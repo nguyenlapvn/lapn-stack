@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# modules/30-ssl.sh — SSL qua certbot: HTTP-01, DNS-01 (Cloudflare), Origin CA.
-# Một cơ chế gia hạn duy nhất: certbot.timer + deploy-hook reload nginx.
+# modules/30-ssl.sh — SSL via certbot: HTTP-01, DNS-01 (Cloudflare), Origin CA.
+# A single renewal mechanism: certbot.timer + deploy-hook to reload nginx.
 
 MODULE_NAME="SSL / Cloudflare"
 MODULE_ORDER=30
@@ -19,14 +19,14 @@ _ssl_parse() {
   done
 }
 
-# Đảm bảo certbot + timer + deploy hook reload nginx.
+# Ensure certbot + timer + deploy hook to reload nginx.
 _ssl_ensure_certbot() {
   if ! command -v certbot >/dev/null 2>&1; then
-    log_step "Cài certbot"
+    log_step "Install certbot"
     export DEBIAN_FRONTEND=noninteractive
     apt-get install -y certbot python3-certbot-nginx python3-certbot-dns-cloudflare
   fi
-  # Deploy hook: reload nginx sau mỗi lần gia hạn (áp cho mọi cert).
+  # Deploy hook: reload nginx after every renewal (applies to all certs).
   local hookdir="/etc/letsencrypt/renewal-hooks/deploy"
   mkdir -p "$hookdir"
   local hook="$hookdir/lapn-reload-nginx.sh"
@@ -43,11 +43,11 @@ cmd_ssl_issue() {
   state_init
 
   local domain; domain="$(resolve_input "domain" "$SSL_DOMAIN" \
-    --prompt "Domain cấp SSL" --validate validate_domain)"
-  state_site_exists "$domain" || die "Không có site '$domain' (tạo site trước)."
+    --prompt "Domain to issue SSL for" --validate validate_domain)"
+  state_site_exists "$domain" || die "No site '$domain' (create the site first)."
 
   local method; method="$(resolve_input "method" "$SSL_METHOD" \
-    --prompt "Phương thức SSL" --select "certbot-nginx dns-cloudflare cf-origin" \
+    --prompt "SSL method" --select "certbot-nginx dns-cloudflare cf-origin" \
     --default "certbot-nginx" --validate validate_ssl_method)"
 
   _ssl_ensure_certbot
@@ -59,13 +59,13 @@ cmd_ssl_issue() {
     cf-origin)       _ssl_issue_cf_origin "$domain" ;;
   esac
 
-  # Bật HSTS + cập nhật state.
+  # Enable HSTS + update state.
   _ssl_enable_hsts
   state_site_set_field "$domain" ssl true
   state_site_set_field "$domain" ssl_method "\"$method\""
   nginx -t && systemctl reload nginx
   audit "OK" "ssl:issue $domain method=$method"
-  log_ok "SSL ($method) đã cấp cho $domain."
+  log_ok "SSL ($method) issued for $domain."
 }
 
 _ssl_account_email() {
@@ -73,7 +73,7 @@ _ssl_account_email() {
   if [[ -f "$f" ]]; then cat "$f"; return 0; fi
   local email=""
   if [[ "${LAPN_INTERACTIVE:-0}" == "1" ]]; then
-    email="$(ui_ask "Email cho Let's Encrypt (thông báo hết hạn)")"
+    email="$(ui_ask "Email for Let's Encrypt (expiry notifications)")"
   fi
   if [[ -n "$email" ]]; then
     printf '%s' "$email" >"$f"; printf '%s' "$email"
@@ -93,27 +93,27 @@ _ssl_email_flag() {
 
 _ssl_issue_http01() {
   local domain="$1" email="$2"
-  log_step "Cấp cert HTTP-01 (certbot --nginx) cho $domain"
+  log_step "Issue HTTP-01 cert (certbot --nginx) for $domain"
   local behind_cf; behind_cf="$(state_site_get "$domain" behind_cloudflare)"
   if [[ "$behind_cf" == "true" ]]; then
-    log_warn "Site đang sau Cloudflare proxy — HTTP-01 dễ gãy. Cân nhắc --method dns-cloudflare."
+    log_warn "Site is behind Cloudflare proxy — HTTP-01 is fragile. Consider --method dns-cloudflare."
   fi
   # shellcheck disable=SC2046
   certbot --nginx -d "$domain" --redirect --agree-tos --non-interactive \
     $(_ssl_email_flag "$email") ${SSL_DRYRUN:+--dry-run} \
-    || die "certbot HTTP-01 thất bại."
+    || die "certbot HTTP-01 failed."
 }
 
 _ssl_issue_dns_cf() {
   local domain="$1" email="$2"
-  log_step "Cấp cert DNS-01 qua Cloudflare cho $domain"
+  log_step "Issue DNS-01 cert via Cloudflare for $domain"
   local tokfile="${LAPN_SECRETS}/cloudflare.token"
   if [[ -n "$SSL_CF_TOKEN" ]]; then
     mkdir -p "$LAPN_SECRETS"
     printf 'dns_cloudflare_api_token = %s\n' "$SSL_CF_TOKEN" >"$tokfile"
     chmod 600 "$tokfile"
   fi
-  [[ -f "$tokfile" ]] || die "Thiếu CF API token. Truyền --cf-token hoặc tạo $tokfile (Zone.DNS:Edit)."
+  [[ -f "$tokfile" ]] || die "Missing CF API token. Pass --cf-token or create $tokfile (Zone.DNS:Edit)."
   chmod 600 "$tokfile"
   # shellcheck disable=SC2046
   certbot certonly --dns-cloudflare --dns-cloudflare-credentials "$tokfile" \
@@ -122,42 +122,42 @@ _ssl_issue_dns_cf() {
     || certbot certonly --dns-cloudflare --dns-cloudflare-credentials "$tokfile" \
         -d "$domain" --agree-tos --non-interactive \
         $(_ssl_email_flag "$email") ${SSL_DRYRUN:+--dry-run} \
-    || die "certbot DNS-01 thất bại."
+    || die "certbot DNS-01 failed."
   _ssl_wire_cert_into_nginx "$domain" "/etc/letsencrypt/live/$domain"
-  # Site sau Cloudflare → bật real-IP snippet.
+  # Site behind Cloudflare → enable real-IP snippet.
   state_site_set_field "$domain" behind_cloudflare true
   _ssl_enable_cf_realip "$domain"
 }
 
 _ssl_issue_cf_origin() {
   local domain="$1"
-  log_step "Cài Cloudflare Origin Certificate cho $domain"
+  log_step "Install Cloudflare Origin Certificate for $domain"
   local dir="${LAPN_ETC}/ssl/${domain}"
   mkdir -p "$dir"; chmod 700 "$dir"
-  log_info "Tạo Origin Certificate trên dashboard Cloudflare (SSL/TLS → Origin Server)."
+  log_info "Create the Origin Certificate in the Cloudflare dashboard (SSL/TLS → Origin Server)."
   if [[ "${LAPN_INTERACTIVE:-0}" != "1" ]]; then
-    die "cf-origin cần dán cert/key — chạy ở chế độ tương tác."
+    die "cf-origin requires pasting cert/key — run in interactive mode."
   fi
-  log_info "Dán nội dung CERTIFICATE (kết thúc bằng dòng END, rồi Ctrl-D):"
+  log_info "Paste the CERTIFICATE content (end with the END line, then Ctrl-D):"
   cat >"$dir/origin.pem"
-  log_info "Dán PRIVATE KEY (Ctrl-D để kết thúc):"
+  log_info "Paste the PRIVATE KEY (Ctrl-D to finish):"
   cat >"$dir/origin.key"
   chmod 600 "$dir/origin.key"
-  [[ -s "$dir/origin.pem" && -s "$dir/origin.key" ]] || die "Cert/key rỗng."
+  [[ -s "$dir/origin.pem" && -s "$dir/origin.key" ]] || die "Cert/key is empty."
   _ssl_wire_cert_into_nginx "$domain" "$dir" "origin.pem" "origin.key"
   state_site_set_field "$domain" behind_cloudflare true
   _ssl_enable_cf_realip "$domain"
-  log_info "Đặt SSL mode = Full (strict) trên Cloudflare cho $domain."
+  log_info "Set SSL mode = Full (strict) on Cloudflare for $domain."
 }
 
-# Chèn listen 443 + đường dẫn cert vào nginx conf của site (cho dns-cf / cf-origin).
+# Insert listen 443 + cert paths into the site's nginx conf (for dns-cf / cf-origin).
 _ssl_wire_cert_into_nginx() {
   local domain="$1" certdir="$2" cert="${3:-fullchain.pem}" key="${4:-privkey.pem}"
   local name; name="$(state_site_get "$domain" name)"
   local conf="/etc/nginx/sites-available/lapn-${name}.conf"
-  [[ -f "$conf" ]] || die "Không thấy nginx conf của $domain."
+  [[ -f "$conf" ]] || die "nginx conf for $domain not found."
   if grep -q "listen 443" "$conf"; then
-    log_info "nginx conf đã có block 443 — bỏ qua."
+    log_info "nginx conf already has a 443 block — skipping."
     return 0
   fi
   cat >>"$conf" <<EOF
@@ -175,18 +175,18 @@ server {
     include /etc/nginx/snippets/lapn-https-locations-${name}.conf;
 }
 EOF
-  # Tách phần location của block 80 ra include dùng chung — đơn giản: copy proxy_pass.
+  # Extract the location parts of the 80 block into a shared include — simple: copy proxy_pass.
   _ssl_extract_locations "$conf" "$name"
 }
 
-# Trích các location từ server block 80 thành snippet để block 443 include lại.
+# Extract the locations from the 80 server block into a snippet for the 443 block to include.
 _ssl_extract_locations() {
   local conf="$1" name="$2"
   local snip="/etc/nginx/snippets/lapn-https-locations-${name}.conf"
-  # Lấy mọi block location { ... } trong file conf gốc.
+  # Grab every location { ... } block in the original conf file.
   awk '/location[ ]/{f=1} f{print} f&&/^\}/{ }' "$conf" | sed -n '/location/,/^}/p' >"$snip" 2>/dev/null || true
   if [[ ! -s "$snip" ]]; then
-    # Fallback: proxy chung tới port.
+    # Fallback: generic proxy to the port.
     local port; port="$(jq -r --arg n "$name" '.sites | to_entries[] | select(.value.name==$n) | .value.port' "$LAPN_STATE")"
     cat >"$snip" <<EOF
 location / {
@@ -210,7 +210,7 @@ _ssl_enable_cf_realip() {
   local domain="$1" name; name="$(state_site_get "$domain" name)"
   local conf="/etc/nginx/sites-available/lapn-${name}.conf"
   local inc="include /etc/nginx/snippets/lapn-cloudflare-realip.conf;"
-  # Đảm bảo snippet đã cài (install.sh cài sẵn); chèn include vào conf nếu chưa có.
+  # Ensure the snippet is installed (install.sh installs it); insert the include into the conf if missing.
   if [[ -f "$conf" ]] && ! grep -q "cloudflare-realip" "$conf"; then
     sed -i "s|server_name ${domain};|server_name ${domain};\n    ${inc}|" "$conf"
   fi
@@ -220,30 +220,30 @@ cmd_ssl_renew() {
   core_require_root
   _ssl_parse "$@"
   _ssl_ensure_certbot
-  log_step "Gia hạn cert"
+  log_step "Renew cert"
   certbot renew ${SSL_DRYRUN:+--dry-run}
   nginx -t && systemctl reload nginx
-  log_ok "Đã chạy gia hạn."
+  log_ok "Renewal run complete."
 }
 
 cmd_ssl_status() {
   if command -v certbot >/dev/null 2>&1; then
     certbot certificates 2>/dev/null || true
   else
-    log_info "certbot chưa cài."
+    log_info "certbot is not installed."
   fi
   printf '\ncertbot.timer: %s\n' "$(systemctl is-active certbot.timer 2>/dev/null || echo 'inactive')"
 }
 
-# ssl:cf-ips-update — refresh dải IP Cloudflare trong snippet realip.
+# ssl:cf-ips-update — refresh Cloudflare IP ranges in the realip snippet.
 cmd_ssl_cf_ips_update() {
   core_require_root
   local snip="/etc/nginx/snippets/lapn-cloudflare-realip.conf"
-  log_step "Cập nhật dải IP Cloudflare"
+  log_step "Update Cloudflare IP ranges"
   local v4 v6
   v4="$(curl -fsS --max-time 10 https://www.cloudflare.com/ips-v4 2>/dev/null || true)"
   v6="$(curl -fsS --max-time 10 https://www.cloudflare.com/ips-v6 2>/dev/null || true)"
-  [[ -n "$v4" ]] || die "Không tải được ips-v4 từ Cloudflare."
+  [[ -n "$v4" ]] || die "Failed to download ips-v4 from Cloudflare."
   {
     printf '# LapN — auto-generated %s\n' "$(date -Iseconds)"
     printf '# --- BEGIN CLOUDFLARE IPS ---\n'
@@ -253,5 +253,5 @@ cmd_ssl_cf_ips_update() {
     printf 'real_ip_header CF-Connecting-IP;\n'
   } >"$snip"
   nginx -t && systemctl reload nginx
-  log_ok "Đã cập nhật $snip"
+  log_ok "Updated $snip"
 }

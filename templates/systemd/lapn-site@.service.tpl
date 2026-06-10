@@ -1,6 +1,6 @@
-# LapN — hardened systemd unit cho site.
-# Render thành /etc/systemd/system/lapn-{{NAME}}.service
-# Placeholder: {{DOMAIN}} {{NAME}} {{USER}} {{WORKDIR}} {{ENVFILE}} {{PORT}}
+# LapN — hardened systemd unit for the site.
+# Rendered into /etc/systemd/system/lapn-{{NAME}}.service
+# Placeholders: {{DOMAIN}} {{NAME}} {{USER}} {{WORKDIR}} {{ENVFILE}} {{PORT}}
 #              {{EXEC_START}} {{MEMORY_MAX}} {{CPU_QUOTA}}
 [Unit]
 Description=LapN site: {{DOMAIN}}

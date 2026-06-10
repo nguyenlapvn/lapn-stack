@@ -1,5 +1,5 @@
-# LapN — reverse proxy cho site Node.js. {{DOMAIN}} -> 127.0.0.1:{{PORT}}
-# Placeholder: {{DOMAIN}} {{PORT}} {{CLIENT_MAX_BODY}} {{CF_REALIP_INCLUDE}}
+# LapN — reverse proxy for Node.js site. {{DOMAIN}} -> 127.0.0.1:{{PORT}}
+# Placeholders: {{DOMAIN}} {{PORT}} {{CLIENT_MAX_BODY}} {{CF_REALIP_INCLUDE}}
 map $http_upgrade $connection_upgrade {
     default upgrade;
     ''      close;
@@ -10,7 +10,7 @@ server {
     listen [::]:80;
     server_name {{DOMAIN}};
 
-    # IP thật khi sau Cloudflare (rỗng nếu site không dùng CF).
+    # Real IP when behind Cloudflare (empty if the site does not use CF).
     {{CF_REALIP_INCLUDE}}
 
     include /etc/nginx/snippets/lapn-security-headers.conf;
@@ -32,7 +32,7 @@ server {
         proxy_send_timeout 60s;
     }
 
-    # Endpoint đăng nhập/auth: rate limit chặt hơn.
+    # Login/auth endpoint: stricter rate limit.
     location ~ ^/(api/(login|auth)|login|register) {
         limit_req zone=lapn_auth burst=5 nodelay;
         proxy_pass http://127.0.0.1:{{PORT}};

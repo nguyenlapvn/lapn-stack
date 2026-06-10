@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
-# bin/lapn — CLI router của LapN.
-# Quy ước: lapn <module:action> [--flags]. Không tham số → menu tương tác.
+# bin/lapn — LapN CLI router.
+# Convention: lapn <module:action> [--flags]. No arguments → interactive menu.
 set -euo pipefail
 
-# --- Tìm LAPN_HOME (thư mục code), kể cả khi gọi qua symlink ---
+# --- Find LAPN_HOME (the code directory), even when invoked through a symlink ---
 _resolve_home() {
   local src="${BASH_SOURCE[0]}" dir
   while [[ -h "$src" ]]; do
@@ -23,10 +23,48 @@ export LAPN_HOME
 source "$LAPN_HOME/lib/core.sh"
 core_bootstrap
 
-# --- Menu tương tác ---
+# --- Interactive menu ---
+
+# Clear the screen (if available), skip if unsupported.
+lapn_clear() { command -v clear >/dev/null 2>&1 && clear || printf '\n'; }
+
+# Pause so the user can read the result before returning to the menu.
+lapn_pause() {
+  printf '\n%sPress Enter to return to the menu...%s' "$C_DIM" "$C_RESET"
+  read -r _ || true
+}
+
+# Submenu of a module — loops until the user chooses "Back".
+lapn_submenu() {
+  local chosen="$1"
+  # shellcheck disable=SC2206
+  local cmds=(${LAPN_MODULE_CMDS[$chosen]})
+  local choice j
+  while true; do
+    lapn_clear
+    printf '%s%sLapN%s › %s%s%s\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET" "$C_BOLD" "$chosen" "$C_RESET"
+    for j in "${!cmds[@]}"; do
+      printf '  %s) %s\n' "$((j + 1))" "${cmds[$j]}"
+    done
+    printf '  0) ← Back to main menu\n'
+
+    read -r -p "→ " choice || return 0
+    [[ "$choice" == "0" || -z "$choice" ]] && return 0
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#cmds[@]} )); then
+      printf '\n'
+      # Run in a subshell: a command's die/exit does not kill the menu; errors do not propagate to set -e.
+      ( core_dispatch "${cmds[$((choice - 1))]}" ) || log_warn "Command finished with an error (see the message above)."
+      lapn_pause
+    else
+      log_warn "Invalid choice."
+      lapn_pause
+    fi
+  done
+}
+
+# Main menu — loops until the user chooses "Exit".
 lapn_menu() {
   local modules=() name
-  # Sắp xếp module theo order.
   while IFS= read -r name; do
     modules+=("$name")
   done < <(
@@ -35,52 +73,40 @@ lapn_menu() {
     done | sort -n | cut -f2-
   )
 
-  printf '\n%s%sLapN%s — Lightweight App Platform for Node.js\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
-  printf '%sChọn nhóm chức năng:%s\n' "$C_DIM" "$C_RESET"
+  local choice i menu_names=()
+  while true; do
+    lapn_clear
+    printf '%s%sLapN%s — Lightweight App Platform for Node.js\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
+    printf '%sChoose a feature group:%s\n\n' "$C_DIM" "$C_RESET"
 
-  local i=1 menu_names=()
-  for name in "${modules[@]}"; do
-    [[ -z "${LAPN_MODULE_CMDS[$name]:-}" ]] && continue
-    printf '  %s) %s\n' "$i" "$name"
-    menu_names+=("$name")
-    ((i++))
+    menu_names=(); i=1
+    for name in "${modules[@]}"; do
+      [[ -z "${LAPN_MODULE_CMDS[$name]:-}" ]] && continue
+      printf '  %s) %s\n' "$i" "$name"
+      menu_names+=("$name")
+      ((i++))
+    done
+    printf '  0) Exit\n'
+
+    read -r -p "→ " choice || return 0
+    [[ "$choice" == "0" || -z "$choice" ]] && { printf 'Goodbye.\n'; return 0; }
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#menu_names[@]} )); then
+      lapn_submenu "${menu_names[$((choice - 1))]}"
+    else
+      log_warn "Invalid choice."
+      lapn_pause
+    fi
   done
-  printf '  0) Thoát\n'
-
-  local choice
-  read -r -p "→ " choice || exit 0
-  [[ "$choice" == "0" || -z "$choice" ]] && exit 0
-  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#menu_names[@]} )); then
-    log_warn "Lựa chọn không hợp lệ."; return 0
-  fi
-
-  local chosen="${menu_names[$((choice - 1))]}"
-  # shellcheck disable=SC2206
-  local cmds=(${LAPN_MODULE_CMDS[$chosen]})
-  printf '\n%s%s%s\n' "$C_BOLD" "$chosen" "$C_RESET"
-  local j
-  for j in "${!cmds[@]}"; do
-    printf '  %s) %s\n' "$((j + 1))" "${cmds[$j]}"
-  done
-  printf '  0) Quay lại\n'
-
-  read -r -p "→ " choice || return 0
-  [[ "$choice" == "0" || -z "$choice" ]] && return 0
-  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#cmds[@]} )); then
-    core_dispatch "${cmds[$((choice - 1))]}"
-  else
-    log_warn "Lựa chọn không hợp lệ."
-  fi
 }
 
 # --- Help ---
 lapn_help() {
-  printf 'LapN — quản lý website Node.js trên VPS.\n\n'
-  printf 'Cách dùng:\n'
-  printf '  lapn                      mở menu tương tác\n'
-  printf '  lapn <module:action> ...  chạy lệnh trực tiếp\n'
-  printf '  lapn help                 trợ giúp này\n\n'
-  printf 'Các lệnh khả dụng:\n'
+  printf 'LapN — manage Node.js websites on a VPS.\n\n'
+  printf 'Usage:\n'
+  printf '  lapn                      open the interactive menu\n'
+  printf '  lapn <module:action> ...  run a command directly\n'
+  printf '  lapn help                 this help\n\n'
+  printf 'Available commands:\n'
   local name c
   while IFS= read -r name; do
     [[ -z "${LAPN_MODULE_CMDS[$name]:-}" ]] && continue

@@ -1,5 +1,5 @@
-# LapN — serve static build trực tiếp (không systemd unit).
-# Placeholder: {{DOMAIN}} {{ROOT}} {{CLIENT_MAX_BODY}} {{CF_REALIP_INCLUDE}}
+# LapN — serve static build directly (no systemd unit).
+# Placeholders: {{DOMAIN}} {{ROOT}} {{CLIENT_MAX_BODY}} {{CF_REALIP_INCLUDE}}
 server {
     listen 80;
     listen [::]:80;
@@ -20,7 +20,7 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
-    # Cache asset có hash.
+    # Cache hashed assets.
     location ~* \.(?:css|js|woff2?|ttf|otf|eot|svg|png|jpg|jpeg|gif|ico|webp|avif)$ {
         expires 30d;
         add_header Cache-Control "public, max-age=2592000, immutable";

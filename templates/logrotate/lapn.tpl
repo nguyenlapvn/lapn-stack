@@ -1,4 +1,4 @@
-# LapN — log rotation. Cài thành /etc/logrotate.d/lapn bởi install.sh.
+# LapN — log rotation. Installed as /etc/logrotate.d/lapn by install.sh.
 
 /var/log/lapn/actions.log {
     weekly
@@ -10,7 +10,7 @@
     create 0640 root adm
 }
 
-# File log app tự ghi (nếu app ghi thẳng ra file). stdout/stderr đã vào journald.
+# App-written log files (if the app writes directly to a file). stdout/stderr already go to journald.
 /home/sites/*/logs/*.log {
     daily
     rotate 14

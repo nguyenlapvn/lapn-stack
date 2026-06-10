@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# lib/log.sh — màu terminal + audit log /var/log/lapn/actions.log
-# Không chứa logic nghiệp vụ.
+# lib/log.sh — terminal colors + audit log /var/log/lapn/actions.log
+# Contains no business logic.
 
-# --- Màu (tắt khi không phải TTY) ---
+# --- Colors (disabled when not a TTY) ---
 if [[ -t 1 ]]; then
   C_RESET=$'\033[0m'; C_RED=$'\033[31m'; C_GREEN=$'\033[32m'
   C_YELLOW=$'\033[33m'; C_BLUE=$'\033[34m'; C_DIM=$'\033[2m'; C_BOLD=$'\033[1m'
@@ -17,7 +17,7 @@ log_error() { printf '%s[✗]%s %s\n' "$C_RED"    "$C_RESET" "$*" >&2; }
 log_step()  { printf '\n%s==>%s %s%s%s\n' "$C_BOLD" "$C_RESET" "$C_BOLD" "$*" "$C_RESET"; }
 log_dim()   { printf '%s%s%s\n' "$C_DIM" "$*" "$C_RESET"; }
 
-# die "thông điệp" [mã thoát] — in lỗi rồi thoát.
+# die "message" [exit code] — print error then exit.
 die() {
   local msg="$1" code="${2:-1}"
   log_error "$msg"
@@ -25,8 +25,8 @@ die() {
   exit "$code"
 }
 
-# audit <kết quả> <thông điệp> — ghi dòng vào actions.log (nếu ghi được).
-# Định dạng: ISO8601 | invoker | uid | result | message
+# audit <result> <message> — write a line to actions.log (if writable).
+# Format: ISO8601 | invoker | uid | result | message
 audit() {
   local result="$1"; shift
   local msg="$*"
@@ -34,12 +34,12 @@ audit() {
   local logfile="${LAPN_LOG:-$logdir/actions.log}"
   local invoker="${SUDO_USER:-${USER:-unknown}}"
   local ts; ts="$(date -Iseconds 2>/dev/null || date)"
-  # Không để lỗi log làm chết lệnh chính.
+  # Do not let a logging error kill the main command.
   { [[ -d "$logdir" ]] || mkdir -p "$logdir" 2>/dev/null; } || return 0
   printf '%s | %s | uid=%s | %s | %s\n' \
     "$ts" "$invoker" "$(id -u 2>/dev/null || echo '?')" "$result" "$msg" \
     >>"$logfile" 2>/dev/null || true
 }
 
-# audit_cmd "lệnh đang chạy" — tiện log mở đầu một action.
+# audit_cmd "command being run" — convenience to log the start of an action.
 audit_cmd() { audit "RUN" "$*"; }

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# modules/90-doctor.sh — audit toàn server. Output ✅/⚠️/❌.
+# modules/90-doctor.sh — full server audit. Output ✅/⚠️/❌.
 
-MODULE_NAME="Chẩn đoán (doctor)"
+MODULE_NAME="Diagnostics (doctor)"
 MODULE_ORDER=90
 MODULE_COMMANDS=("doctor")
 
@@ -14,10 +14,10 @@ cmd_doctor() {
   state_init
   printf '%s%sLapN doctor%s — %s\n' "$C_BOLD" "$C_BLUE" "$C_RESET" "$(date -Iseconds)"
 
-  _dr_section "Hệ thống"
+  _dr_section "System"
   _dr_check_disk_ram
 
-  _dr_section "Cấu hình nền"
+  _dr_section "Base configuration"
   _dr_check_logrotate
   _dr_check_journald
   _dr_check_firewall
@@ -29,7 +29,7 @@ cmd_doctor() {
   _dr_section "Sites"
   _dr_check_sites
 
-  printf '\n%sKết quả:%s %s✓ %d%s  %s⚠ %d%s  %s✗ %d%s\n' \
+  printf '\n%sResult:%s %s✓ %d%s  %s⚠ %d%s  %s✗ %d%s\n' \
     "$C_BOLD" "$C_RESET" "$C_GREEN" "$_DR_OK" "$C_RESET" \
     "$C_YELLOW" "$_DR_WARN" "$C_RESET" "$C_RED" "$_DR_ERR" "$C_RESET"
   (( _DR_ERR == 0 ))
@@ -40,42 +40,42 @@ _dr_section() { printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"; }
 _dr_check_disk_ram() {
   local diskpct rammb
   diskpct="$(df -P / | awk 'NR==2{gsub("%","",$5); print $5}')"
-  if (( diskpct >= 90 )); then _dr_err "Disk / đầy ${diskpct}%"; else _dr_ok "Disk / dùng ${diskpct}%"; fi
+  if (( diskpct >= 90 )); then _dr_err "Disk / full ${diskpct}%"; else _dr_ok "Disk / used ${diskpct}%"; fi
   rammb="$(free -m | awk '/^Mem:/{print $2}')"
-  if (( rammb < 1900 )); then _dr_warn "RAM ${rammb}MB (<2GB — build dễ OOM)"; else _dr_ok "RAM ${rammb}MB"; fi
+  if (( rammb < 1900 )); then _dr_warn "RAM ${rammb}MB (<2GB — build prone to OOM)"; else _dr_ok "RAM ${rammb}MB"; fi
 }
 
 _dr_check_logrotate() {
-  if [[ -f /etc/logrotate.d/lapn ]]; then _dr_ok "logrotate đã cài"; else _dr_err "Thiếu /etc/logrotate.d/lapn"; fi
+  if [[ -f /etc/logrotate.d/lapn ]]; then _dr_ok "logrotate installed"; else _dr_err "Missing /etc/logrotate.d/lapn"; fi
 }
 
 _dr_check_journald() {
   if grep -qE '^\s*SystemMaxUse=' /etc/systemd/journald.conf 2>/dev/null; then
-    _dr_ok "journald có trần dung lượng"
+    _dr_ok "journald has a size cap"
   else
-    _dr_warn "journald chưa đặt SystemMaxUse (log có thể phình)"
+    _dr_warn "journald has no SystemMaxUse set (logs may grow unbounded)"
   fi
 }
 
 _dr_check_firewall() {
-  if ! command -v ufw >/dev/null 2>&1; then _dr_warn "ufw chưa cài"; return; fi
+  if ! command -v ufw >/dev/null 2>&1; then _dr_warn "ufw not installed"; return; fi
   if ufw status 2>/dev/null | grep -q "Status: active"; then
     _dr_ok "UFW active"
   else
-    _dr_warn "UFW chưa bật"
+    _dr_warn "UFW not enabled"
   fi
-  # Cảnh báo nếu mở port DB ra ngoài.
+  # Warn if a DB port is open to the outside.
   local p
   for p in 3306 5432 27017 6379; do
     if ufw status 2>/dev/null | grep -qE "^${p}[/ ].*ALLOW"; then
-      _dr_err "UFW đang MỞ port DB $p ra ngoài — đóng ngay (DB chỉ nên qua SSH tunnel)!"
+      _dr_err "UFW is OPENING DB port $p to the outside — close it immediately (DB should only go over SSH tunnel)!"
     fi
   done
 }
 
 _dr_check_certbot_timer() {
   if command -v certbot >/dev/null 2>&1; then
-    if systemctl is-active --quiet certbot.timer; then _dr_ok "certbot.timer active (auto-renew)"; else _dr_warn "certbot.timer không chạy"; fi
+    if systemctl is-active --quiet certbot.timer; then _dr_ok "certbot.timer active (auto-renew)"; else _dr_warn "certbot.timer not running"; fi
   fi
 }
 
@@ -86,19 +86,19 @@ _dr_check_db_binds() {
     case "$e" in
       mariadb|mysql)
         if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*|::):3306$'; then
-          _dr_err "$e bind 0.0.0.0:3306 — phải là 127.0.0.1!"
+          _dr_err "$e bind 0.0.0.0:3306 — must be 127.0.0.1!"
         else _dr_ok "$e bind localhost"; fi ;;
       postgres)
         if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*|::):5432$'; then
-          _dr_err "postgres bind 0.0.0.0:5432 — phải localhost!"
+          _dr_err "postgres bind 0.0.0.0:5432 — must be localhost!"
         else _dr_ok "postgres bind localhost"; fi ;;
       mongo)
         if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*|::):27017$'; then
-          _dr_err "mongo bind 0.0.0.0:27017 — phải localhost!"
+          _dr_err "mongo bind 0.0.0.0:27017 — must be localhost!"
         else _dr_ok "mongo bind localhost"; fi ;;
       redis)
         if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*):6379$'; then
-          _dr_err "redis bind 0.0.0.0:6379 — phải localhost!"
+          _dr_err "redis bind 0.0.0.0:6379 — must be localhost!"
         else _dr_ok "redis bind localhost"; fi ;;
     esac
   done
@@ -106,7 +106,7 @@ _dr_check_db_binds() {
 
 _dr_check_sites() {
   local count; count="$(state_jq -r '.sites | length')"
-  if [[ "$count" == "0" ]]; then printf '  (chưa có site)\n'; return; fi
+  if [[ "$count" == "0" ]]; then printf '  (no sites yet)\n'; return; fi
   local domain
   while IFS= read -r domain; do
     local name type port user ssl method behind envfile
@@ -121,30 +121,30 @@ _dr_check_sites() {
 
     printf '  %s%s%s\n' "$C_BOLD" "$domain" "$C_RESET"
 
-    # .env quyền 600
+    # .env permissions 600
     if [[ -f "$envfile" ]]; then
       local perm; perm="$(stat -c '%a' "$envfile" 2>/dev/null)"
-      [[ "$perm" == "600" ]] && _dr_ok ".env quyền 600" || _dr_err ".env quyền $perm (phải 600)"
+      [[ "$perm" == "600" ]] && _dr_ok ".env permissions 600" || _dr_err ".env permissions $perm (must be 600)"
     else
-      _dr_warn ".env không tồn tại"
+      _dr_warn ".env does not exist"
     fi
 
     # app bind localhost
     if [[ "$type" != "static" ]]; then
       if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE "^(0\.0\.0\.0|\*):${port}$"; then
-        _dr_err "app bind 0.0.0.0:${port} — phải 127.0.0.1"
+        _dr_err "app bind 0.0.0.0:${port} — must be 127.0.0.1"
       else
         _dr_ok "app bind localhost:${port}"
       fi
-      systemctl is-active --quiet "lapn-${name}.service" && _dr_ok "unit active" || _dr_err "unit không chạy"
+      systemctl is-active --quiet "lapn-${name}.service" && _dr_ok "unit active" || _dr_err "unit not running"
     fi
 
     # SSL method vs Cloudflare
     if [[ "$ssl" == "true" && "$method" == "certbot-nginx" && "$behind" == "true" ]]; then
-      _dr_warn "dùng HTTP-01 nhưng sau Cloudflare — gia hạn sẽ gãy, chuyển dns-cloudflare"
+      _dr_warn "using HTTP-01 but behind Cloudflare — renewal will break, switch to dns-cloudflare"
     fi
 
-    # cert hết hạn
+    # cert expiry
     if [[ "$ssl" == "true" ]] && command -v openssl >/dev/null; then
       _dr_check_cert_expiry "$domain"
     fi
@@ -159,9 +159,9 @@ _dr_check_cert_expiry() {
     end="$(openssl x509 -enddate -noout -in "$certfile" 2>/dev/null | cut -d= -f2)"
     [[ -z "$end" ]] && return
     days=$(( ( $(date -d "$end" +%s) - $(date +%s) ) / 86400 ))
-    if (( days < 14 )); then _dr_err "cert hết hạn trong ${days} ngày"; \
-    elif (( days < 30 )); then _dr_warn "cert còn ${days} ngày"; \
-    else _dr_ok "cert còn ${days} ngày"; fi
+    if (( days < 14 )); then _dr_err "cert expires in ${days} days"; \
+    elif (( days < 30 )); then _dr_warn "cert has ${days} days left"; \
+    else _dr_ok "cert has ${days} days left"; fi
     return
   done
 }
