@@ -57,9 +57,20 @@ lapn_submenu() {
     read -r -p "→ " choice || return 0
     [[ "$choice" == "0" || -z "$choice" ]] && return 0
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#cmds[@]} )); then
+      local cmd="${cmds[$((choice - 1))]}"
       printf '\n'
-      # Run in a subshell: a command's die/exit does not kill the menu; errors do not propagate to set -e.
-      ( core_dispatch "${cmds[$((choice - 1))]}" ) || log_warn "Command finished with an error (see the message above)."
+      # Run in a subshell: a command's die/exit does not kill the menu; the `if` also
+      # suppresses set -e so a non-zero return does not abort the whole program.
+      if ( core_dispatch "$cmd" ); then
+        # After a successful self-update, re-exec so the new code is loaded into memory
+        # (the running process still holds the old code until restarted).
+        if [[ "$cmd" == "update" ]]; then
+          log_ok "Reloading lapn with the new version..."
+          exec "$LAPN_HOME/bin/lapn"
+        fi
+      else
+        log_warn "Command finished with an error (see the message above)."
+      fi
       lapn_pause
     else
       log_warn "Invalid choice."

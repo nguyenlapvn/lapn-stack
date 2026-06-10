@@ -44,6 +44,9 @@ cmd_update() {
   state_migrate
 
   log_ok "Update complete. Version: $(cat "$LAPN_HOME/VERSION" 2>/dev/null || echo '?')"
+  # Note: the running process still holds the old code in memory. When launched from the
+  # interactive menu, bin/lapn re-execs itself after this returns so the new code loads.
+  # For CLI use (`lapn update`), the next command is already a fresh process.
 }
 
 # Re-copy only assets that are NOT mutated at runtime, so template fixes propagate
