@@ -59,10 +59,24 @@ cmd_site_create() {
   user="${user:0:32}"   # limit Linux user name length
   local port
   if [[ -n "$ARG_PORT" ]]; then
+    # Explicit --port: validate, never silently fall back to another port.
     net_check_user_port "$ARG_PORT" || die "Port --port=$ARG_PORT cannot be used."
     port="$ARG_PORT"
   else
-    port="$(net_alloc_port)" || die "No free port available in range ${LAPN_PORT_MIN}-${LAPN_PORT_MAX}."
+    # Auto-pick the lowest free internal port as the suggested default.
+    local auto; auto="$(net_alloc_port)" \
+      || die "No free port available in range ${LAPN_PORT_MIN}-${LAPN_PORT_MAX}."
+    if [[ "${LAPN_INTERACTIVE:-0}" == "1" ]]; then
+      # Ask, defaulting to auto. Press Enter to accept auto, or type a custom port.
+      while true; do
+        local input; input="$(ui_ask "Internal app port (Enter = auto $auto)" "$auto")"
+        if [[ "$input" == "$auto" ]]; then port="$auto"; break; fi
+        if net_check_user_port "$input"; then port="$input"; break; fi
+        # invalid -> ask again
+      done
+    else
+      port="$auto"
+    fi
   fi
 
   # Warn about DNS if it does not point to the server yet.
