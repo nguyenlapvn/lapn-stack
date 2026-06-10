@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-# modules/05-self.sh — manage LapN itself: update, version.
+# modules/70-info.sh — info & self-management of LapN: update, version.
 
-MODULE_NAME="LapN itself"
-MODULE_ORDER=5
+MODULE_NAME="Info"
+MODULE_ORDER=70
 MODULE_COMMANDS=("update" "version")
 
 # update — pull latest code into $LAPN_HOME, re-sync safe assets, run migrations.

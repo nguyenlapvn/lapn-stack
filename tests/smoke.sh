@@ -38,7 +38,9 @@ sect "router & module discovery"
 if LAPN_HOME="$LAPN_HOME" bash "$LAPN_HOME/bin/lapn" help >/tmp/lapn-help.txt 2>&1; then
   ok "lapn help runs"
   grep -q "site:create" /tmp/lapn-help.txt && ok "site module discovered" || bad "site:create not found in help"
-  grep -q "db:install"  /tmp/lapn-help.txt && ok "db module discovered"   || bad "db:install not found"
+  grep -q "deploy:git"  /tmp/lapn-help.txt && ok "deploy merged into site" || bad "deploy:git not found in help"
+  grep -q "db:create"   /tmp/lapn-help.txt && ok "db module discovered"   || bad "db:create not found"
+  grep -q "stack:mysql" /tmp/lapn-help.txt && ok "db-engine install under stack" || bad "stack:mysql not found"
   grep -q "update"      /tmp/lapn-help.txt && ok "update command present" || bad "update command not found"
 else
   bad "lapn help failed: $(cat /tmp/lapn-help.txt)"

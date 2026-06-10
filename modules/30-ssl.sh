@@ -2,7 +2,7 @@
 # modules/30-ssl.sh — SSL via certbot: HTTP-01, DNS-01 (Cloudflare), Origin CA.
 # A single renewal mechanism: certbot.timer + deploy-hook to reload nginx.
 
-MODULE_NAME="SSL / Cloudflare"
+MODULE_NAME="SSL"
 MODULE_ORDER=30
 MODULE_COMMANDS=("ssl:issue" "ssl:renew" "ssl:status" "ssl:cf-ips-update")
 

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # modules/90-doctor.sh — full server audit. Output ✅/⚠️/❌.
 
-MODULE_NAME="Diagnostics (doctor)"
-MODULE_ORDER=90
+MODULE_NAME="Diagnostics"
+MODULE_ORDER=50
 MODULE_COMMANDS=("doctor")
 
 _DR_OK=0; _DR_WARN=0; _DR_ERR=0

@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# modules/55-db.sh — Optional database: install each engine, per-site user, bind localhost.
-# Remote via Navicat over SSH tunnel (db:remote). Does NOT install any web tool.
+# modules/20-db.sh — Database MANAGEMENT: create / drop / console / status / remote.
+# Per-site user, bind localhost. Remote via Navicat over SSH tunnel (db:remote).
+# NOTE: installing the engine software (mysql/mariadb/postgres/mongo/redis) lives in
+#       the Stack module. cmd_db_install stays here as a function the Stack calls and
+#       remains usable via the CLI (lapn db:install <engine>), just hidden from the menu.
 
 MODULE_NAME="Database"
-MODULE_ORDER=55
-MODULE_COMMANDS=("db:install" "db:status" "db:create" "db:drop" "db:console" "db:remote")
+MODULE_ORDER=20
+MODULE_COMMANDS=("db:status" "db:create" "db:drop" "db:console" "db:remote")
 
 _db_parse() {
   DB_SITE=""; DB_ENGINE=""; DB_FORCE=""
