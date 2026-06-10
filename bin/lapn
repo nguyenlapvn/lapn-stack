@@ -37,6 +37,12 @@ lapn_pause() {
 # Submenu of a module — loops until the user chooses "Back".
 lapn_submenu() {
   local chosen="$1"
+  # If the module provides a custom submenu function, delegate to it.
+  local custom="${LAPN_MODULE_MENU[$chosen]:-}"
+  if [[ -n "$custom" ]] && declare -F "$custom" >/dev/null; then
+    "$custom"
+    return 0
+  fi
   # shellcheck disable=SC2206
   local cmds=(${LAPN_MODULE_CMDS[$chosen]})
   local choice j

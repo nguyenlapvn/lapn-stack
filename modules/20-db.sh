@@ -37,13 +37,19 @@ _db_gen_pass() { openssl rand -base64 24 | tr -d '/+=' | head -c 24; }
 # ============ INSTALL ============
 cmd_db_install() {
   core_require_root
-  local engine="${1:-}"
+  local engine="" force=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --force) force=1; shift ;;
+      *) [[ -z "$engine" ]] && engine="$1"; shift ;;
+    esac
+  done
   [[ -z "$engine" ]] && engine="$(resolve_input "engine" "" --prompt "Engine to install" \
     --select "mariadb postgres mongo redis mysql" --validate validate_db_engine)"
   validate_db_engine "$engine" || die "Invalid engine."
 
-  if state_service_installed "$engine"; then
-    log_info "Engine '$engine' Installed (idempotent — skipping)."
+  if [[ -z "$force" ]] && state_service_installed "$engine"; then
+    log_info "Engine '$engine' already installed (idempotent — skipping). Use --force to reinstall."
     return 0
   fi
   mkdir -p "${LAPN_SECRETS}/_db"; chmod 700 "${LAPN_SECRETS}/_db"

@@ -25,9 +25,10 @@ core_load_libs() {
 }
 
 # Registry: command -> "module_name|order" to build the menu.
-declare -gA LAPN_CMD_MODULE=()      # "site:create" -> "Website Management"
-declare -gA LAPN_MODULE_ORDER=()    # "Website Management" -> 20
-declare -gA LAPN_MODULE_CMDS=()     # "Website Management" -> "site:create site:list ..."
+declare -gA LAPN_CMD_MODULE=()      # "site:create" -> "Site management"
+declare -gA LAPN_MODULE_ORDER=()    # "Site management" -> 10
+declare -gA LAPN_MODULE_CMDS=()     # "Site management" -> "site:create site:list ..."
+declare -gA LAPN_MODULE_MENU=()     # "Stack" -> "stack_menu" (optional custom submenu fn)
 
 # --- Load modules (auto-discovered by numeric prefix) ---
 core_load_modules() {
@@ -35,13 +36,14 @@ core_load_modules() {
   shopt -s nullglob
   for f in "$LAPN_HOME"/modules/[0-9]*.sh; do
     # Reset metadata before each module.
-    MODULE_NAME=""; MODULE_ORDER=0; MODULE_COMMANDS=()
+    MODULE_NAME=""; MODULE_ORDER=0; MODULE_COMMANDS=(); MODULE_MENU=""
     # shellcheck source=/dev/null
     source "$f"
     base="$(basename "$f")"
     [[ -z "$MODULE_NAME" ]] && MODULE_NAME="$base"
     LAPN_MODULE_ORDER["$MODULE_NAME"]="${MODULE_ORDER:-99}"
     LAPN_MODULE_CMDS["$MODULE_NAME"]="${MODULE_COMMANDS[*]:-}"
+    LAPN_MODULE_MENU["$MODULE_NAME"]="${MODULE_MENU:-}"
     local c
     for c in "${MODULE_COMMANDS[@]:-}"; do
       [[ -n "$c" ]] && LAPN_CMD_MODULE["$c"]="$MODULE_NAME"

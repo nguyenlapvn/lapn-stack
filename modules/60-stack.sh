@@ -8,6 +8,8 @@ MODULE_ORDER=60
 MODULE_COMMANDS=("stack:install" "stack:nginx" "stack:node" "stack:pm2" \
                  "stack:mariadb" "stack:mysql" "stack:postgres" "stack:mongo" "stack:redis" \
                  "stack:status")
+# Friendly interactive submenu (CLI still uses the stack:* commands above).
+MODULE_MENU="stack_menu"
 
 # stack:install — install base packages (idempotent). Usually called by install.sh.
 cmd_stack_install() {
@@ -115,4 +117,98 @@ stack_install_node_for_user() {
     eval \"\$(fnm env --shell bash 2>/dev/null)\" || true
     fnm install $ver && fnm default $ver
   " || die "Installing Node v$ver for $user failed."
+}
+
+# =====================================================================
+# Friendly interactive menu (invoked by bin/lapn via MODULE_MENU).
+#   1) Install software  -> pick a component; if already installed, ask to reinstall
+#   2) Status
+# =====================================================================
+
+# Installable components: keys + human labels (same index).
+_STACK_KEYS=(base nginx node pm2 mariadb mysql postgres mongo redis)
+_STACK_LABELS=(
+  "Base packages (nginx, jq, ufw, fail2ban, fnm...)"
+  "Nginx"
+  "Node (fnm)"
+  "PM2 (process manager)"
+  "MariaDB"
+  "MySQL"
+  "PostgreSQL"
+  "MongoDB"
+  "Redis"
+)
+
+# stack_is_installed <key> -> return 0 if already installed.
+stack_is_installed() {
+  case "$1" in
+    base) return 1 ;;  # no single marker; always allow running the base install
+    nginx) command -v nginx >/dev/null 2>&1 ;;
+    node)  command -v fnm >/dev/null 2>&1 ;;
+    pm2)   bash -lc 'eval "$(fnm env --shell bash 2>/dev/null)"; command -v pm2 >/dev/null 2>&1' ;;
+    mariadb|mysql|postgres|mongo|redis) state_service_installed "$1" ;;
+    *) return 1 ;;
+  esac
+}
+
+# stack_do_install <key> <force> — run the matching installer (in a subshell so die() won't kill the menu).
+stack_do_install() {
+  local key="$1" force="$2"
+  case "$key" in
+    base)  ( cmd_stack_install ) ;;
+    nginx) ( cmd_stack_nginx ) ;;
+    node)  ( cmd_stack_node ) ;;
+    pm2)   ( cmd_stack_pm2 ) ;;
+    mariadb|mysql|postgres|mongo|redis)
+      if [[ -n "$force" ]]; then ( cmd_db_install "$key" --force ); else ( cmd_db_install "$key" ); fi ;;
+  esac || log_warn "Install finished with an error (see the message above)."
+}
+
+stack_install_menu() {
+  local choice i key label
+  while true; do
+    lapn_clear
+    printf '%s%sLapN%s › Stack › Install software\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
+    for i in "${!_STACK_KEYS[@]}"; do
+      local mark="[ ]"; stack_is_installed "${_STACK_KEYS[$i]}" && mark="[${C_GREEN}x${C_RESET}]"
+      printf '  %2d) %s %s\n' "$((i + 1))" "$mark" "${_STACK_LABELS[$i]}"
+    done
+    printf '   0) ← Back\n'
+    read -r -p "→ " choice || return 0
+    [[ "$choice" == "0" || -z "$choice" ]] && return 0
+    if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#_STACK_KEYS[@]} )); then
+      key="${_STACK_KEYS[$((choice - 1))]}"; label="${_STACK_LABELS[$((choice - 1))]}"
+      printf '\n'
+      if stack_is_installed "$key"; then
+        if ui_confirm "$label is already installed. Reinstall?" N; then
+          stack_do_install "$key" 1
+        else
+          log_info "Skipped — $label kept as is."
+        fi
+      else
+        stack_do_install "$key" ""
+      fi
+      lapn_pause
+    else
+      log_warn "Invalid choice."; lapn_pause
+    fi
+  done
+}
+
+stack_menu() {
+  local choice
+  while true; do
+    lapn_clear
+    printf '%s%sLapN%s › Stack\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
+    printf '  1) Install software\n'
+    printf '  2) Status\n'
+    printf '  0) ← Back to main menu\n'
+    read -r -p "→ " choice || return 0
+    case "$choice" in
+      1) stack_install_menu ;;
+      2) ( cmd_stack_status ) || true; lapn_pause ;;
+      0|"") return 0 ;;
+      *) log_warn "Invalid choice."; lapn_pause ;;
+    esac
+  done
 }
