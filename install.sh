@@ -4,7 +4,7 @@
 #   hoặc: sudo bash /opt/lapn/install.sh
 set -euo pipefail
 
-LAPN_REPO="${LAPN_REPO:-https://github.com/nguyenlap/lapn-stack}"
+LAPN_REPO="${LAPN_REPO:-https://github.com/nguyenlapvn/lapn-stack}"
 LAPN_HOME="/opt/lapn"
 LAPN_BRANCH="${LAPN_BRANCH:-main}"
 
