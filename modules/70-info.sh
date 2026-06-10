@@ -12,16 +12,23 @@ cmd_update() {
 
   if [[ -d "$LAPN_HOME/.git" ]]; then
     git -C "$LAPN_HOME" fetch --all --quiet || die "git fetch failed."
-    local before after
+    # Track the upstream branch (fallback to origin/main).
+    local branch upstream before after
+    branch="$(git -C "$LAPN_HOME" rev-parse --abbrev-ref HEAD 2>/dev/null || echo main)"
+    upstream="$(git -C "$LAPN_HOME" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null || echo "origin/${branch}")"
+    [[ "$upstream" == "@{u}" || -z "$upstream" ]] && upstream="origin/main"
     before="$(git -C "$LAPN_HOME" rev-parse --short HEAD 2>/dev/null || echo '?')"
-    if ! git -C "$LAPN_HOME" pull --ff-only; then
-      die "git pull failed (uncommitted local changes? run 'git -C $LAPN_HOME status')."
+    # /opt/lapn is a managed deployment (code only, no real data). Reset hard to the
+    # remote so the update is robust against local churn (e.g. CRLF/LF line-ending drift)
+    # that would otherwise block a plain 'git pull'.
+    if ! git -C "$LAPN_HOME" reset --hard "$upstream" >/dev/null 2>&1; then
+      die "git reset to $upstream failed (run 'git -C $LAPN_HOME status')."
     fi
     after="$(git -C "$LAPN_HOME" rev-parse --short HEAD 2>/dev/null || echo '?')"
     if [[ "$before" == "$after" ]]; then
       log_ok "Already up to date ($after)."
     else
-      log_ok "Updated: $before -> $after"
+      log_ok "Updated: $before -> $after (synced to $upstream)"
     fi
   else
     log_warn "$LAPN_HOME is not a git repo — cannot self-update."
