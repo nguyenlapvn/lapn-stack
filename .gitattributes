@@ -1,0 +1,7 @@
+# Bash scripts MUST use LF line endings (chạy trên Linux). Ép kể cả khi dev trên Windows.
+*.sh        text eol=lf
+*.tpl       text eol=lf
+*.conf      text eol=lf
+bin/lapn    text eol=lf
+install.sh  text eol=lf
+* text=auto

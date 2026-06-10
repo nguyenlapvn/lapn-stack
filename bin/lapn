@@ -1,0 +1,114 @@
+#!/usr/bin/env bash
+# bin/lapn — CLI router của LapN.
+# Quy ước: lapn <module:action> [--flags]. Không tham số → menu tương tác.
+set -euo pipefail
+
+# --- Tìm LAPN_HOME (thư mục code), kể cả khi gọi qua symlink ---
+_resolve_home() {
+  local src="${BASH_SOURCE[0]}" dir
+  while [[ -h "$src" ]]; do
+    dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+    src="$(readlink "$src")"
+    [[ "$src" != /* ]] && src="$dir/$src"
+  done
+  dir="$(cd -P "$(dirname "$src")" >/dev/null 2>&1 && pwd)"
+  # bin/ -> repo root
+  dirname "$dir"
+}
+
+LAPN_HOME="$(_resolve_home)"
+export LAPN_HOME
+
+# shellcheck source=../lib/core.sh
+source "$LAPN_HOME/lib/core.sh"
+core_bootstrap
+
+# --- Menu tương tác ---
+lapn_menu() {
+  local modules=() name
+  # Sắp xếp module theo order.
+  while IFS= read -r name; do
+    modules+=("$name")
+  done < <(
+    for name in "${!LAPN_MODULE_ORDER[@]}"; do
+      printf '%s\t%s\n' "${LAPN_MODULE_ORDER[$name]}" "$name"
+    done | sort -n | cut -f2-
+  )
+
+  printf '\n%s%sLapN%s — Lightweight App Platform for Node.js\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
+  printf '%sChọn nhóm chức năng:%s\n' "$C_DIM" "$C_RESET"
+
+  local i=1 menu_names=()
+  for name in "${modules[@]}"; do
+    [[ -z "${LAPN_MODULE_CMDS[$name]:-}" ]] && continue
+    printf '  %s) %s\n' "$i" "$name"
+    menu_names+=("$name")
+    ((i++))
+  done
+  printf '  0) Thoát\n'
+
+  local choice
+  read -r -p "→ " choice || exit 0
+  [[ "$choice" == "0" || -z "$choice" ]] && exit 0
+  if ! [[ "$choice" =~ ^[0-9]+$ ]] || (( choice < 1 || choice > ${#menu_names[@]} )); then
+    log_warn "Lựa chọn không hợp lệ."; return 0
+  fi
+
+  local chosen="${menu_names[$((choice - 1))]}"
+  # shellcheck disable=SC2206
+  local cmds=(${LAPN_MODULE_CMDS[$chosen]})
+  printf '\n%s%s%s\n' "$C_BOLD" "$chosen" "$C_RESET"
+  local j
+  for j in "${!cmds[@]}"; do
+    printf '  %s) %s\n' "$((j + 1))" "${cmds[$j]}"
+  done
+  printf '  0) Quay lại\n'
+
+  read -r -p "→ " choice || return 0
+  [[ "$choice" == "0" || -z "$choice" ]] && return 0
+  if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#cmds[@]} )); then
+    core_dispatch "${cmds[$((choice - 1))]}"
+  else
+    log_warn "Lựa chọn không hợp lệ."
+  fi
+}
+
+# --- Help ---
+lapn_help() {
+  printf 'LapN — quản lý website Node.js trên VPS.\n\n'
+  printf 'Cách dùng:\n'
+  printf '  lapn                      mở menu tương tác\n'
+  printf '  lapn <module:action> ...  chạy lệnh trực tiếp\n'
+  printf '  lapn help                 trợ giúp này\n\n'
+  printf 'Các lệnh khả dụng:\n'
+  local name c
+  while IFS= read -r name; do
+    [[ -z "${LAPN_MODULE_CMDS[$name]:-}" ]] && continue
+    printf '  %s%s%s\n' "$C_BOLD" "$name" "$C_RESET"
+    for c in ${LAPN_MODULE_CMDS[$name]}; do
+      printf '    lapn %s\n' "$c"
+    done
+  done < <(
+    for n in "${!LAPN_MODULE_ORDER[@]}"; do
+      printf '%s\t%s\n' "${LAPN_MODULE_ORDER[$n]}" "$n"
+    done | sort -n | cut -f2-
+  )
+}
+
+main() {
+  if [[ $# -eq 0 ]]; then
+    if [[ "${LAPN_INTERACTIVE:-0}" == "1" ]]; then
+      lapn_menu
+    else
+      lapn_help
+    fi
+    return 0
+  fi
+  case "$1" in
+    help|-h|--help) lapn_help ;;
+    version|-v|--version) printf 'lapn %s\n' "$(cat "$LAPN_HOME/VERSION" 2>/dev/null || echo '0.1.0')" ;;
+    *) core_dispatch "$@" ;;
+  esac
+}
+
+main "$@"
