@@ -55,12 +55,15 @@ cmd_db_install() {
   mkdir -p "${LAPN_SECRETS}/_db"; chmod 700 "${LAPN_SECRETS}/_db"
   export DEBIAN_FRONTEND=noninteractive
 
+  # Each installer must return non-zero on failure. Do NOT mark the engine as
+  # installed if the install failed (set -e may be suppressed when called from the
+  # menu via `( ... ) || ...`, so check the return explicitly).
   case "$engine" in
-    mariadb) _db_install_mariadb ;;
-    mysql)   _db_install_mysql ;;
-    postgres) _db_install_postgres ;;
-    mongo)   _db_install_mongo ;;
-    redis)   _db_install_redis ;;
+    mariadb)  _db_install_mariadb  || die "MariaDB install failed." ;;
+    mysql)    _db_install_mysql    || die "MySQL install failed." ;;
+    postgres) _db_install_postgres || die "PostgreSQL install failed." ;;
+    mongo)    _db_install_mongo    || die "MongoDB install failed (check Ubuntu version support)." ;;
+    redis)    _db_install_redis    || die "Redis install failed." ;;
   esac
 
   local ver port
@@ -136,22 +139,34 @@ _db_install_postgres() {
 }
 
 _db_install_mongo() {
-  log_step "Install MongoDB (official repo)"
-  apt-get install -y gnupg curl
-  curl -fsSL https://www.mongodb.org/static/pgp/server-7.0.asc \
-    | gpg -o /usr/share/keyrings/mongodb-server-7.0.gpg --dearmor --yes
+  # MongoDB 7.0 does NOT have a repo for Ubuntu 24.04 (noble) -> 404.
+  # 8.0 supports both 22.04 (jammy) and 24.04 (noble), so use it.
+  local mver="8.0"
   local codename; codename="$(. /etc/os-release && echo "$VERSION_CODENAME")"
-  echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-7.0.gpg ] https://repo.mongodb.org/apt/ubuntu ${codename}/mongodb-org/7.0 multiverse" \
-    >/etc/apt/sources.list.d/mongodb-org-7.0.list
-  apt-get update -y
-  apt-get install -y mongodb-org
+  log_step "Install MongoDB ${mver} (official repo, ${codename})"
+  case "$codename" in
+    jammy|noble) : ;;
+    *) log_warn "MongoDB repo may not support '$codename'; trying ${mver} anyway." ;;
+  esac
+
+  apt-get install -y gnupg curl || return 1
+  curl -fsSL "https://www.mongodb.org/static/pgp/server-${mver}.asc" \
+    | gpg -o "/usr/share/keyrings/mongodb-server-${mver}.gpg" --dearmor --yes || return 1
+  echo "deb [ arch=amd64,arm64 signed-by=/usr/share/keyrings/mongodb-server-${mver}.gpg ] https://repo.mongodb.org/apt/ubuntu ${codename}/mongodb-org/${mver} multiverse" \
+    >"/etc/apt/sources.list.d/mongodb-org-${mver}.list"
+  apt-get update -y || true   # other repos may warn; the install step below confirms mongo repo
+  if ! apt-get install -y mongodb-org; then
+    log_error "Could not install mongodb-org (repo for '$codename' unavailable). See https://www.mongodb.com/docs/manual/administration/install-on-linux/"
+    return 1
+  fi
+
   # bind localhost + enable auth.
   sed -i 's/^\( *bindIp:\).*/\1 127.0.0.1/' /etc/mongod.conf 2>/dev/null || true
-  if ! grep -q '^security:' /etc/mongod.conf; then
+  if ! grep -q '^security:' /etc/mongod.conf 2>/dev/null; then
     printf '\nsecurity:\n  authorization: enabled\n' >>/etc/mongod.conf
   fi
-  systemctl enable --now mongod
-  # Create admin user.
+  systemctl enable --now mongod || return 1
+  # Create admin user (localhost exception applies before the first user exists).
   local rootpass; rootpass="$(_db_gen_pass)"
   printf '%s' "$rootpass" >"$(_db_root_secret mongo)"; chmod 600 "$(_db_root_secret mongo)"
   systemctl restart mongod; sleep 3
