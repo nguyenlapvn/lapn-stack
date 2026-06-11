@@ -53,8 +53,8 @@ validate_site_name() {
 validate_db_engine() {
   local e="$1"
   case "$e" in
-    mariadb|mysql|postgres|mongo|redis) return 0 ;;
-    *) log_warn "Unsupported engine: '$e' (mariadb|mysql|postgres|mongo|redis)"; return 1 ;;
+    mariadb|postgres|mongo|redis) return 0 ;;
+    *) log_warn "Unsupported engine: '$e' (mariadb|postgres|mongo|redis)"; return 1 ;;
   esac
 }
 

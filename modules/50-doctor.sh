@@ -81,10 +81,10 @@ _dr_check_certbot_timer() {
 
 _dr_check_db_binds() {
   local e svc conf bind
-  for e in mariadb mysql postgres mongo redis; do
+  for e in mariadb postgres mongo redis; do
     state_service_installed "$e" || continue
     case "$e" in
-      mariadb|mysql)
+      mariadb)
         if ss -tlnH 2>/dev/null | awk '{print $4}' | grep -qE '^(0\.0\.0\.0|\*|::):3306$'; then
           _dr_err "$e bind 0.0.0.0:3306 — must be 127.0.0.1!"
         else _dr_ok "$e bind localhost"; fi ;;

@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # modules/60-stack.sh — install all infrastructure software in one place:
-# base packages, Nginx, fnm/Node, PM2, and DB engines (mariadb/mysql/postgres/mongo/redis).
+# base packages, Nginx, fnm/Node, PM2, and DB engines (mariadb/postgres/mongo/redis).
 # Installing software lives here; managing databases lives in the Database module.
 
 MODULE_NAME="Stack"
 MODULE_ORDER=60
 MODULE_COMMANDS=("stack:install" "stack:nginx" "stack:node" "stack:pm2" \
-                 "stack:mariadb" "stack:mysql" "stack:postgres" "stack:mongo" "stack:redis" \
+                 "stack:mariadb" "stack:postgres" "stack:mongo" "stack:redis" \
                  "stack:status")
 # Friendly interactive submenu (CLI still uses the stack:* commands above).
 MODULE_MENU="stack_menu"
@@ -79,7 +79,6 @@ cmd_stack_pm2() {
 # DB engine installers — delegate to the Database module's installer (cmd_db_install),
 # so the engine software is installed from the Stack menu while DB management stays separate.
 cmd_stack_mariadb()  { cmd_db_install mariadb; }
-cmd_stack_mysql()    { cmd_db_install mysql; }
 cmd_stack_postgres() { cmd_db_install postgres; }
 cmd_stack_mongo()    { cmd_db_install mongo; }
 cmd_stack_redis()    { cmd_db_install redis; }
@@ -96,9 +95,9 @@ cmd_stack_status() {
   printf '  fail2ban: %s\n' "$(systemctl is-active fail2ban 2>/dev/null || echo 'not running')"
   printf '  -- DB engines --\n'
   local e svc
-  for e in mariadb mysql postgres mongo redis; do
+  for e in mariadb postgres mongo redis; do
     case "$e" in
-      mariadb) svc=mariadb ;; mysql) svc=mysql ;; postgres) svc=postgresql ;;
+      mariadb) svc=mariadb ;; postgres) svc=postgresql ;;
       mongo) svc=mongod ;; redis) svc=redis-server ;;
     esac
     if state_service_installed "$e"; then
@@ -127,14 +126,13 @@ stack_install_node_for_user() {
 # =====================================================================
 
 # Installable components: keys + human labels (same index).
-_STACK_KEYS=(base nginx node pm2 mariadb mysql postgres mongo redis)
+_STACK_KEYS=(base nginx node pm2 mariadb postgres mongo redis)
 _STACK_LABELS=(
   "Base packages (curl, git, jq, ufw, fail2ban, openssl, logrotate)"
   "Nginx"
   "Node (fnm)"
   "PM2 (process manager)"
   "MariaDB"
-  "MySQL"
   "PostgreSQL"
   "MongoDB"
   "Redis"
@@ -147,7 +145,7 @@ stack_is_installed() {
     nginx) command -v nginx >/dev/null 2>&1 ;;
     node)  command -v fnm >/dev/null 2>&1 ;;
     pm2)   bash -lc 'eval "$(fnm env --shell bash 2>/dev/null)"; command -v pm2 >/dev/null 2>&1' ;;
-    mariadb|mysql|postgres|mongo|redis) state_service_installed "$1" ;;
+    mariadb|postgres|mongo|redis) state_service_installed "$1" ;;
     *) return 1 ;;
   esac
 }
@@ -160,7 +158,7 @@ stack_do_install() {
     nginx) ( cmd_stack_nginx ) ;;
     node)  ( cmd_stack_node ) ;;
     pm2)   ( cmd_stack_pm2 ) ;;
-    mariadb|mysql|postgres|mongo|redis)
+    mariadb|postgres|mongo|redis)
       if [[ -n "$force" ]]; then ( cmd_db_install "$key" --force ); else ( cmd_db_install "$key" ); fi ;;
   esac || log_warn "Install finished with an error (see the message above)."
 }
