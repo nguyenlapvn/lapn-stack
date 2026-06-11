@@ -58,6 +58,14 @@ validate_db_engine() {
   esac
 }
 
+# Valid DB identifier (db name / db user): letters, digits, underscore; not starting with a digit.
+validate_db_ident() {
+  local s="$1"
+  if [[ "$s" =~ ^[a-zA-Z_][a-zA-Z0-9_]{0,62}$ ]]; then return 0; fi
+  log_warn "Invalid name '$s' (use letters, digits, underscore; cannot start with a digit)"
+  return 1
+}
+
 # Valid app type.
 validate_app_type() {
   local t="$1"

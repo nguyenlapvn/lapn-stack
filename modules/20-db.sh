@@ -12,12 +12,15 @@ MODULE_COMMANDS=("db:status" "db:list" "db:create" "db:drop" "db:backup" "db:con
 MODULE_MENU="database_menu"
 
 _db_parse() {
-  DB_SITE=""; DB_ENGINE=""; DB_FORCE=""
+  DB_SITE=""; DB_ENGINE=""; DB_FORCE=""; DB_NAME=""; DB_USER=""; DB_PASS=""
   DBR_ADD=""; DBR_DEL=""; DBR_INFO=""; DBR_USER=""; DBR_KEY=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --site)   DB_SITE="$2"; shift 2 ;;
       --engine) DB_ENGINE="$2"; shift 2 ;;
+      --dbname) DB_NAME="$2"; shift 2 ;;
+      --dbuser) DB_USER="$2"; shift 2 ;;
+      --dbpass) DB_PASS="$2"; shift 2 ;;
       --force)  DB_FORCE=1; shift ;;
       --add)    DBR_ADD=1; shift ;;
       --del)    DBR_DEL=1; shift ;;
@@ -204,47 +207,95 @@ cmd_db_status() {
 }
 
 # ============ CREATE ============
+# db:create [--engine X] [--dbname N] [--dbuser U] [--dbpass P] [--site D]
+# You input db name / user / password directly. Optionally attach to a site (writes .env).
 cmd_db_create() {
   core_require_root
   _db_parse "$@"
   state_init
-  local domain; domain="$(resolve_input "domain" "$DB_SITE" --prompt "Site (domain)" --validate validate_domain)"
-  state_site_exists "$domain" || die "No site '$domain'."
+
   local engine; engine="$(resolve_input "engine" "$DB_ENGINE" --prompt "Engine" \
     --select "mariadb postgres mongo redis" --validate validate_db_engine)"
-  state_service_installed "$engine" || die "Engine '$engine' not installed. Run: lapn db:install $engine"
+  state_service_installed "$engine" || die "Engine '$engine' not installed. Install it from Stack."
 
-  local name; name="$(state_site_get "$domain" name)"
-  local dbname="${name//-/_}_db"
-  local dbuser="${name//-/_}_u"; dbuser="${dbuser:0:31}"
-  local dbpass; dbpass="$(_db_gen_pass)"
-  local envfile="${LAPN_SECRETS}/${name}/.env"
+  # Optional site link (derives default names + writes the connection var into its .env).
+  local domain="$DB_SITE" sitename=""
+  if [[ -n "$domain" ]]; then
+    state_site_exists "$domain" || die "No site '$domain'."
+    sitename="$(state_site_get "$domain" name)"
+  fi
+  local slug="${sitename//-/_}"
 
-  log_step "Create DB $engine for $domain"
-  local url=""
-  case "$engine" in
-    mariadb)       url="$(_db_create_mysql "$dbname" "$dbuser" "$dbpass")" ;;
-    postgres)      url="$(_db_create_postgres "$dbname" "$dbuser" "$dbpass")" ;;
-    mongo)         url="$(_db_create_mongo "$dbname" "$dbuser" "$dbpass")" ;;
-    redis)         url="$(_db_create_redis "$domain")" ;;
-  esac
-
-  # Insert connection variable into .env (idempotent: remove old line then append).
-  if [[ -n "$url" ]]; then
-    local key="DATABASE_URL"; [[ "$engine" == "redis" ]] && key="REDIS_URL"
-    sed -i "/^${key}=/d" "$envfile" 2>/dev/null || true
-    printf '%s=%s\n' "$key" "$url" >>"$envfile"
-    chmod 600 "$envfile"
+  # Redis is a single shared instance — no per-db user/password.
+  if [[ "$engine" == "redis" ]]; then
+    _db_create_redis_flow "$domain" "$sitename"; return 0
   fi
 
-  # Write state (engine/name/user — NO password).
-  local dbinfo
-  dbinfo="$(jq -n --arg e "$engine" --arg n "$dbname" --arg u "$dbuser" \
-    '{engine:$e, name:$n, user:$u}')"
-  state_update '.sites[$d].db = ((.sites[$d].db // []) + [$x] | unique_by(.engine))' \
-    --arg d "$domain" --argjson x "$dbinfo"
-  audit "OK" "db:create $domain $engine $dbname"
-  log_ok "DB '$dbname' (user '$dbuser') created, connection variable written to .env."
+  # Input db name / user / password (defaults derived from the site if one is given).
+  local def_name="" def_user=""
+  [[ -n "$slug" ]] && { def_name="${slug}_db"; def_user="${slug:0:29}_u"; }
+  local dbname dbuser dbpass
+  dbname="$(resolve_input "dbname" "$DB_NAME" --prompt "Database name" --default "$def_name" --validate validate_db_ident)"
+  dbuser="$(resolve_input "dbuser" "$DB_USER" --prompt "Database user" --default "$def_user" --validate validate_db_ident)"
+  if [[ -n "$DB_PASS" ]]; then
+    dbpass="$DB_PASS"
+  elif [[ -z "$domain" && "${LAPN_INTERACTIVE:-0}" == "1" ]]; then
+    dbpass="$(ui_password "Password (leave blank to auto-generate)")"
+    [[ -z "$dbpass" ]] && dbpass="$(_db_gen_pass)"
+  else
+    dbpass="$(_db_gen_pass)"   # auto when attaching to a site or non-interactive
+  fi
+
+  log_step "Create $engine database '$dbname' (user '$dbuser')"
+  local url=""
+  case "$engine" in
+    mariadb)  url="$(_db_create_mysql "$dbname" "$dbuser" "$dbpass")" ;;
+    postgres) url="$(_db_create_postgres "$dbname" "$dbuser" "$dbpass")" ;;
+    mongo)    url="$(_db_create_mongo "$dbname" "$dbuser" "$dbpass")" ;;
+  esac
+
+  # Track in top-level .databases (engine/name/user/site — NEVER the password).
+  state_update '.databases = ((.databases // []) + [$x] | unique_by([.engine,.name]))' \
+    --argjson x "$(jq -n --arg e "$engine" --arg n "$dbname" --arg u "$dbuser" --arg s "${domain:-}" \
+        '{engine:$e, name:$n, user:$u, site:(if $s=="" then null else $s end)}')"
+
+  # Optional: write connection var into the site's .env.
+  if [[ -n "$domain" && -n "$url" ]]; then
+    local envfile="${LAPN_SECRETS}/${sitename}/.env"
+    sed -i "/^DATABASE_URL=/d" "$envfile" 2>/dev/null || true
+    printf 'DATABASE_URL=%s\n' "$url" >>"$envfile"
+    chmod 600 "$envfile" 2>/dev/null || true
+  fi
+
+  audit "OK" "db:create $engine $dbname user=$dbuser"
+
+  # Show what was created (password shown ONCE).
+  printf '\n%s%s✓ Database created%s\n' "$C_GREEN" "$C_BOLD" "$C_RESET"
+  printf '  Engine     : %s\n' "$engine"
+  printf '  DB name    : %s\n' "$dbname"
+  printf '  DB user    : %s\n' "$dbuser"
+  printf '  Password   : %s%s%s\n' "$C_BOLD" "$dbpass" "$C_RESET"
+  printf '  Connection : %s\n' "$url"
+  [[ -n "$domain" ]] && printf '  Site       : %s (written to .env)\n' "$domain"
+  log_warn "Save the password now — it is NOT stored and will not be shown again."
+}
+
+# Redis create flow: shared instance, just surface the connection URL.
+_db_create_redis_flow() {
+  local domain="$1" sitename="$2"
+  local url; url="$(_db_create_redis)"
+  state_update '.databases = ((.databases // []) + [$x] | unique_by([.engine,.name]))' \
+    --argjson x "$(jq -n --arg s "${domain:-}" \
+        '{engine:"redis", name:"(shared)", user:"default", site:(if $s=="" then null else $s end)}')"
+  if [[ -n "$domain" && -n "$sitename" ]]; then
+    local envfile="${LAPN_SECRETS}/${sitename}/.env"
+    sed -i "/^REDIS_URL=/d" "$envfile" 2>/dev/null || true
+    printf 'REDIS_URL=%s\n' "$url" >>"$envfile"; chmod 600 "$envfile" 2>/dev/null || true
+  fi
+  audit "OK" "db:create redis (shared)"
+  printf '\n%s%s✓ Redis connection ready%s (single shared instance, no per-db user)\n' "$C_GREEN" "$C_BOLD" "$C_RESET"
+  printf '  Connection : %s\n' "$url"
+  [[ -n "$domain" ]] && printf '  Site       : %s (REDIS_URL written to .env)\n' "$domain"
 }
 
 _db_create_mysql() {
@@ -282,21 +333,26 @@ _db_create_mongo() {
 }
 
 _db_create_redis() {
-  local domain="$1"
   local pass; pass="$(cat "$(_db_root_secret redis)" 2>/dev/null || true)"
   printf 'redis://default:%s@127.0.0.1:6379' "$pass"
 }
 
 # ============ DROP ============
+# db:drop [--engine X] [--dbname N] [--force]
 cmd_db_drop() {
   core_require_root
   _db_parse "$@"
   state_init
-  local domain; domain="$(resolve_input "domain" "$DB_SITE" --prompt "Site (domain)" --validate validate_domain)"
   local engine; engine="$(resolve_input "engine" "$DB_ENGINE" --prompt "Engine" --validate validate_db_engine)"
-  local name; name="$(state_site_get "$domain" name)"
-  local dbname="${name//-/_}_db"
-  local dbuser="${name//-/_}_u"; dbuser="${dbuser:0:31}"
+  if [[ "$engine" == "redis" ]]; then
+    log_info "Redis is a shared instance — nothing to drop per database."
+    return 0
+  fi
+  local dbname; dbname="$(resolve_input "dbname" "$DB_NAME" --prompt "Database name to drop" --validate validate_db_ident)"
+  # Look up the owning user from state (fallback to --dbuser).
+  local dbuser; dbuser="$(state_jq -r --arg e "$engine" --arg n "$dbname" \
+    '(.databases // [])[] | select(.engine==$e and .name==$n) | .user' 2>/dev/null | head -n1)"
+  [[ -z "$dbuser" || "$dbuser" == "null" ]] && dbuser="$DB_USER"
 
   if [[ -z "$DB_FORCE" ]]; then
     local c; c="$(ui_ask "Re-type the DB name '$dbname' to confirm DELETE")"
@@ -318,20 +374,20 @@ SQL
     postgres)
       sudo -u postgres pg_dump "$dbname" >"${LAPN_TRASH}/${dbname}-${stamp}.sql" 2>/dev/null || true
       sudo -u postgres dropdb --if-exists "$dbname" || true
-      sudo -u postgres psql -c "DROP ROLE IF EXISTS ${dbuser};" || true
+      [[ -n "$dbuser" ]] && sudo -u postgres psql -c "DROP ROLE IF EXISTS ${dbuser};" || true
       ;;
     mongo)
       local admin; admin="$(cat "$(_db_root_secret mongo)" 2>/dev/null || true)"
       mongosh --quiet -u lapnadmin -p "$admin" --authenticationDatabase admin --eval \
         "db.getSiblingDB('${dbname}').dropDatabase()" 2>/dev/null || true
       ;;
-    redis) log_info "Redis shared — not dropping the instance. Skipping." ;;
   esac
 
-  state_update '.sites[$d].db = [(.sites[$d].db // [])[] | select(.engine != $e)]' \
-    --arg d "$domain" --arg e "$engine"
-  audit "OK" "db:drop $domain $engine"
-  log_ok "Deleted DB $engine of $domain (dump in $LAPN_TRASH if any)."
+  # Remove the matching entry from top-level .databases.
+  state_update '.databases = [ (.databases // [])[] | select((.engine==$e and .name==$n) | not) ]' \
+    --arg e "$engine" --arg n "$dbname"
+  audit "OK" "db:drop $engine $dbname"
+  log_ok "Dropped $engine database '$dbname' (dump in $LAPN_TRASH if any)."
 }
 
 # ============ CONSOLE ============
@@ -437,46 +493,44 @@ EOF
 }
 
 # ============ LIST ============
-# db:list [--engine X] — list databases LapN manages (from sites.json), optionally per engine.
+# db:list [--engine X] — list databases LapN manages (top-level .databases), optionally per engine.
 cmd_db_list() {
   state_init
   _db_parse "$@"
   local engine="$DB_ENGINE"
   local rows
   rows="$(state_jq -r --arg e "$engine" '
-    .sites | to_entries[] | .key as $d | (.value.db // [])[]
+    (.databases // [])[]
     | select($e == "" or .engine == $e)
-    | "\($d)\t\(.engine)\t\(.name)\t\(.user)"' 2>/dev/null || true)"
+    | "\(.engine)\t\(.name)\t\(.user)\t\(.site // "-")"' 2>/dev/null || true)"
   if [[ -z "$rows" ]]; then
     log_info "No database for engine '${engine:-any}' yet."
     return 0
   fi
-  printf '%s%-30s %-9s %-20s %s%s\n' "$C_BOLD" "SITE" "ENGINE" "DB NAME" "DB USER" "$C_RESET"
-  printf '%s\n' "$rows" | while IFS=$'\t' read -r d e n u; do
-    printf '%-30s %-9s %-20s %s\n' "$d" "$e" "$n" "$u"
+  printf '%s%-9s %-22s %-18s %s%s\n' "$C_BOLD" "ENGINE" "DB NAME" "DB USER" "SITE" "$C_RESET"
+  printf '%s\n' "$rows" | while IFS=$'\t' read -r e n u s; do
+    printf '%-9s %-22s %-18s %s\n' "$e" "$n" "$u" "$s"
   done
 }
 
 # ============ BACKUP ============
-# db:backup [--site D] [--engine X] — dump a site's DB to the backup dir (does NOT drop).
+# db:backup [--engine X] [--dbname N] — dump a database to the backup dir (does NOT drop).
 cmd_db_backup() {
   core_require_root
   _db_parse "$@"
   state_init
-  local domain; domain="$(resolve_input "domain" "$DB_SITE" --prompt "Site (domain)" --validate validate_domain)"
-  state_site_exists "$domain" || die "No site '$domain'."
   local engine; engine="$(resolve_input "engine" "$DB_ENGINE" --prompt "Engine" \
     --select "mariadb postgres mongo redis" --validate validate_db_engine)"
-
-  # Resolve the actual DB name from state (the one attached to this site for this engine).
-  local dbname; dbname="$(state_site_get "$domain" | jq -r --arg e "$engine" \
-    '(.db // [])[] | select(.engine==$e) | .name' 2>/dev/null | head -n1)"
-  [[ -z "$dbname" ]] && die "Site '$domain' has no $engine database."
+  if [[ "$engine" == "redis" ]]; then
+    log_warn "Redis is a shared cache — per-database dump is not applicable (use an RDB snapshot)."
+    return 0
+  fi
+  local dbname; dbname="$(resolve_input "dbname" "$DB_NAME" --prompt "Database name" --validate validate_db_ident)"
 
   local dir="${LAPN_BACKUP_DIR:-/root/lapn-db-backups}"
   mkdir -p "$dir"; chmod 700 "$dir"
-  local stamp; stamp="$(date +%Y%m%d-%H%M%S)" out
-  log_step "Backup $engine DB '$dbname' of $domain"
+  local stamp out; stamp="$(date +%Y%m%d-%H%M%S)"
+  log_step "Backup $engine database '$dbname'"
   case "$engine" in
     mariadb)
       out="$dir/${dbname}-${stamp}.sql"
@@ -489,12 +543,9 @@ cmd_db_backup() {
       local admin; admin="$(cat "$(_db_root_secret mongo)" 2>/dev/null || true)"
       mongodump -u lapnadmin -p "$admin" --authenticationDatabase admin \
         --db "$dbname" --archive="$out" --gzip || die "mongodump failed." ;;
-    redis)
-      log_warn "Redis is a shared cache — per-site dump is not applicable (use an RDB snapshot)."
-      return 0 ;;
   esac
   chmod 600 "$out" 2>/dev/null || true
-  audit "OK" "db:backup $domain $engine $dbname"
+  audit "OK" "db:backup $engine $dbname"
   log_ok "Backup saved: $out"
 }
 

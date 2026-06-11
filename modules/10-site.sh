@@ -347,13 +347,12 @@ cmd_site_delete() {
 
   log_step "Deleting site $domain"
 
-  # Drop the site's DB (if any and the DB module is available).
+  # Drop databases attached to this site (from top-level .databases).
   if declare -F cmd_db_drop >/dev/null; then
-    local engines; engines="$(state_site_get "$domain" | jq -r '.db[]?.engine' 2>/dev/null || true)"
-    local e
-    for e in $engines; do
-      cmd_db_drop --site "$domain" --engine "$e" --force || log_warn "Drop DB $e error (skipped)."
-    done
+    while IFS=$'\t' read -r e n; do
+      [[ -z "$e" || "$e" == "redis" ]] && continue
+      cmd_db_drop --engine "$e" --dbname "$n" --force || log_warn "Drop DB $n ($e) error (skipped)."
+    done < <(state_jq -r --arg d "$domain" '(.databases // [])[] | select(.site==$d) | "\(.engine)\t\(.name)"' 2>/dev/null || true)
   fi
 
   # stop unit
