@@ -17,7 +17,8 @@ cmd_stack_install() {
   log_step "Installing base packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
-  apt-get install -y curl git jq nginx ufw fail2ban unzip openssl ca-certificates logrotate
+  # Nginx is NOT bundled here — install it via the dedicated 'Nginx' entry (stack:nginx).
+  apt-get install -y curl git jq ufw fail2ban unzip openssl ca-certificates logrotate
   log_ok "Base packages installed."
 
   _stack_install_fnm
@@ -128,7 +129,7 @@ stack_install_node_for_user() {
 # Installable components: keys + human labels (same index).
 _STACK_KEYS=(base nginx node pm2 mariadb mysql postgres mongo redis)
 _STACK_LABELS=(
-  "Base packages (nginx, jq, ufw, fail2ban, fnm...)"
+  "Base packages (curl, git, jq, ufw, fail2ban, openssl, logrotate)"
   "Nginx"
   "Node (fnm)"
   "PM2 (process manager)"
