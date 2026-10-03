@@ -62,7 +62,8 @@ validate_app_port "80" 2>/dev/null && bad "port 80 passes" || ok "service port r
 if (( EUID == 0 )) && pidof systemd >/dev/null 2>&1; then
   sect "end-to-end (root + systemd)"
   bash "$LAPN_HOME/install.sh" </dev/null || bad "install.sh failed"
-  # Create a local demo express app.
+  # Create a local demo express app. It deliberately has no dependencies: the build
+  # runs `npm ci`, which needs a lockfile that matches package.json and no network.
   demo=/tmp/lapn-demo
   mkdir -p "$demo"
   cat >"$demo/server.js" <<'JS'
@@ -70,14 +71,45 @@ const http=require('http');const p=process.env.PORT||3000;
 http.createServer((_,res)=>{res.end('ok')}).listen(p,'127.0.0.1');
 JS
   cat >"$demo/package.json" <<'JSON'
-{"name":"demo","version":"1.0.0","main":"server.js","dependencies":{"express":"^4"}}
+{"name":"demo","version":"1.0.0","main":"server.js"}
+JSON
+  cat >"$demo/package-lock.json" <<'JSON'
+{"name":"demo","version":"1.0.0","lockfileVersion":3,"requires":true,
+ "packages":{"":{"name":"demo","version":"1.0.0"}}}
 JSON
   ( cd "$demo" && git init -q && git add -A && git commit -qm init )
+  # The site user clones this root-owned repo over file://, so upload-pack would refuse
+  # it as "dubious ownership" without an explicit allow.
+  git config --system --add safe.directory "$demo"
   if lapn site:create --domain demo.local --type express --node 20 --git "file://$demo" </dev/null; then
     ok "site:create demo.local"
     port="$(jq -r '.sites["demo.local"].port' /etc/lapn/sites.json)"
+    # The unit must really be running: a sandbox that hides the site home (e.g.
+    # ProtectHome=true over /home/sites) fails here and nowhere else.
+    systemctl is-active --quiet lapn-demo-local.service \
+      && ok "unit lapn-demo-local active" \
+      || bad "unit lapn-demo-local not active: $(systemctl show -p Result --value lapn-demo-local.service 2>/dev/null)"
     sleep 2
     curl -fsS "http://127.0.0.1:${port}/" >/dev/null && ok "curl 200 (port $port)" || bad "curl fail"
+
+    # A site created with no repo must survive (no unit yet) and the first deploy
+    # must be what creates and starts the unit.
+    if lapn site:create --domain demo2.local --type express --node 20 </dev/null; then
+      ok "site:create without --git"
+      nginx -t 2>/dev/null && ok "nginx -t with two sites" || bad "nginx -t failed with two sites"
+      if lapn deploy:git --domain demo2.local --git "file://$demo" </dev/null; then
+        systemctl is-active --quiet lapn-demo2-local.service \
+          && ok "deploy:git created + started the unit" \
+          || bad "unit lapn-demo2-local not active after deploy:git"
+      else
+        bad "deploy:git failed"
+      fi
+      lapn site:delete --domain demo2.local --force </dev/null >/dev/null \
+        && ok "site:delete demo2.local" || bad "site:delete demo2.local failed"
+    else
+      bad "site:create without --git failed"
+    fi
+
     lapn site:delete --domain demo.local --force </dev/null && ok "site:delete" || bad "site:delete failed"
   else
     bad "site:create failed"

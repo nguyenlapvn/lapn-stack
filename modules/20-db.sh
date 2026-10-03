@@ -105,16 +105,17 @@ _db_install_mariadb() {
   printf '[mysqld]\nbind-address = 127.0.0.1\n' >"$cfg"
   systemctl enable --now mariadb
   systemctl restart mariadb
-  # Harden: set root password, remove anonymous + test db.
-  local rootpass; rootpass="$(_db_gen_pass)"
-  printf '%s' "$rootpass" >"$(_db_root_secret mariadb)"; chmod 600 "$(_db_root_secret mariadb)"
-  mysql <<SQL || true
-DELETE FROM mysql.user WHERE User='';
-DROP DATABASE IF EXISTS test;
-DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';
-FLUSH PRIVILEGES;
-SQL
-  log_ok "MariaDB root password saved at $(_db_root_secret mariadb)"
+  # Harden: drop anonymous users + the test database. root keeps unix_socket auth (the
+  # Debian/Ubuntu default), which is how every mysql call in this module connects — so
+  # there is no root password, and nothing to store in a secrets file.
+  # Separate statements on purpose: mysql.user is a view on MariaDB >= 10.4, so a
+  # DELETE against it fails and would abort the rest of a single batch.
+  mysql -e "DELETE FROM mysql.global_priv WHERE User='';" 2>/dev/null \
+    || mysql -e "DELETE FROM mysql.user WHERE User='';" 2>/dev/null || true
+  mysql -e "DROP DATABASE IF EXISTS test;" 2>/dev/null || true
+  mysql -e "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';" 2>/dev/null || true
+  mysql -e "FLUSH PRIVILEGES;" 2>/dev/null || true
+  log_ok "MariaDB hardened (bind 127.0.0.1, root via unix_socket)."
 }
 
 _db_install_postgres() {
@@ -247,12 +248,15 @@ cmd_db_create() {
   fi
 
   log_step "Create $engine database '$dbname' (user '$dbuser')"
+  # The helpers print ONLY the connection URL on stdout; a die() inside them exits the
+  # command substitution's subshell, so the failure has to be caught here.
   local url=""
   case "$engine" in
-    mariadb)  url="$(_db_create_mysql "$dbname" "$dbuser" "$dbpass")" ;;
-    postgres) url="$(_db_create_postgres "$dbname" "$dbuser" "$dbpass")" ;;
-    mongo)    url="$(_db_create_mongo "$dbname" "$dbuser" "$dbpass")" ;;
+    mariadb)  url="$(_db_create_mysql    "$dbname" "$dbuser" "$dbpass")" || die "Creating the MariaDB database failed." ;;
+    postgres) url="$(_db_create_postgres "$dbname" "$dbuser" "$dbpass")" || die "Creating the PostgreSQL database failed." ;;
+    mongo)    url="$(_db_create_mongo    "$dbname" "$dbuser" "$dbpass")" || die "Creating the MongoDB database failed." ;;
   esac
+  [[ -n "$url" ]] || die "Could not build the connection URL for '$dbname'."
 
   # Track in top-level .databases (engine/name/user/site — NEVER the password).
   state_update '.databases = ((.databases // []) + [$x] | unique_by([.engine,.name]))' \
@@ -298,9 +302,11 @@ _db_create_redis_flow() {
   [[ -n "$domain" ]] && printf '  Site       : %s (REDIS_URL written to .env)\n' "$domain"
 }
 
+# The _db_create_* helpers must print NOTHING but the connection URL: the caller
+# captures their stdout. Every client's own chatter is redirected away.
 _db_create_mysql() {
   local dbname="$1" dbuser="$2" dbpass="$3"
-  mysql <<SQL || die "Failed to create MySQL/MariaDB DB."
+  mysql >/dev/null <<SQL || return 1
 CREATE DATABASE IF NOT EXISTS \`${dbname}\` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 CREATE USER IF NOT EXISTS '${dbuser}'@'localhost' IDENTIFIED BY '${dbpass}';
 GRANT ALL PRIVILEGES ON \`${dbname}\`.* TO '${dbuser}'@'localhost';
@@ -311,24 +317,27 @@ SQL
 
 _db_create_postgres() {
   local dbname="$1" dbuser="$2" dbpass="$3"
-  sudo -u postgres psql <<SQL || die "Failed to create PostgreSQL DB."
+  # psql echoes "DO" for a DO block — without >/dev/null that lands in the URL.
+  sudo -u postgres psql >/dev/null <<SQL || return 1
 DO \$\$ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${dbuser}') THEN
     CREATE ROLE ${dbuser} LOGIN PASSWORD '${dbpass}';
   END IF;
 END \$\$;
 SQL
-  sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname='${dbname}'" | grep -q 1 \
-    || sudo -u postgres createdb -O "$dbuser" "$dbname"
+  if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='${dbname}'" | grep -q 1; then
+    sudo -u postgres createdb -O "$dbuser" "$dbname" >/dev/null || return 1
+  fi
   printf 'postgresql://%s:%s@127.0.0.1:5432/%s' "$dbuser" "$dbpass" "$dbname"
 }
 
 _db_create_mongo() {
   local dbname="$1" dbuser="$2" dbpass="$3"
   local admin; admin="$(cat "$(_db_root_secret mongo)" 2>/dev/null || true)"
+  # createUser prints its result document — keep it out of the URL.
   mongosh --quiet -u lapnadmin -p "$admin" --authenticationDatabase admin --eval \
     "db.getSiblingDB('${dbname}').createUser({user:'${dbuser}',pwd:'${dbpass}',roles:[{role:'readWrite',db:'${dbname}'}]})" \
-    2>/dev/null || log_warn "Mongo user may already exist."
+    >/dev/null 2>&1 || log_warn "Mongo user may already exist."
   printf 'mongodb://%s:%s@127.0.0.1:27017/%s' "$dbuser" "$dbpass" "$dbname"
 }
 
@@ -343,7 +352,8 @@ cmd_db_drop() {
   core_require_root
   _db_parse "$@"
   state_init
-  local engine; engine="$(resolve_input "engine" "$DB_ENGINE" --prompt "Engine" --validate validate_db_engine)"
+  local engine; engine="$(resolve_input "engine" "$DB_ENGINE" --prompt "Engine" \
+    --select "mariadb postgres mongo redis" --validate validate_db_engine)"
   if [[ "$engine" == "redis" ]]; then
     log_info "Redis is a shared instance — nothing to drop per database."
     return 0
@@ -400,7 +410,12 @@ cmd_db_console() {
   [[ -z "$url" ]] && die "Site '$domain' has no DB attached."
   log_info "Connecting: $url"
   case "$url" in
-    mysql://*)      mysql "$(_db_url_to_mysql_args "$url")" ;;
+    mysql://*)
+      # One argument per array element: quoting the whole string would hand mysql a
+      # single argv entry ("--user=... --password=... db") and it would fail.
+      local -a margs=(); local a
+      while IFS= read -r a; do margs+=("$a"); done < <(_db_url_to_mysql_args "$url")
+      mysql "${margs[@]}" ;;
     postgresql://*) psql "$url" ;;
     mongodb://*)    mongosh "$url" ;;
     redis://*)      redis-cli -u "$url" ;;
@@ -408,15 +423,16 @@ cmd_db_console() {
   esac
 }
 
+# mysql://user:pass@host:port/db -> one mysql argument per line.
 _db_url_to_mysql_args() {
-  # mysql://user:pass@host:port/db -> --user=... --password=... --host=... db
   local u="$1"
   local rest="${u#mysql://}"
   local creds="${rest%%@*}" hostpart="${rest#*@}"
   local user="${creds%%:*}" pass="${creds#*:}"
   local hostport="${hostpart%%/*}" db="${hostpart#*/}"
   local host="${hostport%%:*}" port="${hostport#*:}"
-  printf -- '--user=%s --password=%s --host=%s --port=%s %s' "$user" "$pass" "$host" "$port" "$db"
+  [[ "$port" == "$hostport" ]] && port=3306
+  printf '%s\n' "--user=$user" "--password=$pass" "--host=$host" "--port=$port" "$db"
 }
 
 # ============ REMOTE (Navicat over SSH tunnel) ============

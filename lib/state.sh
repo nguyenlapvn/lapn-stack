@@ -7,7 +7,7 @@ state_init() {
   [[ -d "$LAPN_ETC" ]] || mkdir -p "$LAPN_ETC"
   if [[ ! -f "$LAPN_STATE" ]]; then
     jq -n --argjson v "${LAPN_SCHEMA_VERSION:-1}" \
-      '{schema_version: $v, services: {}, sites: {}}' >"$LAPN_STATE"
+      '{schema_version: $v, services: {}, sites: {}, databases: []}' >"$LAPN_STATE"
     chmod 600 "$LAPN_STATE"
   fi
 }
@@ -101,6 +101,12 @@ state_migrate() {
     if (( cur < 1 )); then
       state_update '.services //= {} | .sites //= {} | .schema_version = 1'
     fi
-    # Future migration steps go here (v1 → v2 ...).
+    # v1 → v2: databases become part of the schema, and the per-site `db` array goes
+    # away — it was written by site:create but never read; db:list/site:delete have
+    # always used the top-level .databases.
+    if (( cur < 2 )); then
+      state_update '.databases //= [] | .sites |= with_entries(.value |= del(.db)) | .schema_version = 2'
+    fi
+    # Future migration steps go here (v2 → v3 ...).
   fi
 }

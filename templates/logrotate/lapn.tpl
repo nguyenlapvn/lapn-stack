@@ -1,4 +1,5 @@
-# LapN — log rotation. Installed as /etc/logrotate.d/lapn by install.sh.
+# LapN — log rotation. Rendered to /etc/logrotate.d/lapn by install.sh / lapn update.
+# Placeholders: SITES_HOME
 
 /var/log/lapn/actions.log {
     weekly
@@ -11,7 +12,7 @@
 }
 
 # App-written log files (if the app writes directly to a file). stdout/stderr already go to journald.
-/home/sites/*/logs/*.log {
+{{SITES_HOME}}/*/logs/*.log {
     daily
     rotate 14
     compress

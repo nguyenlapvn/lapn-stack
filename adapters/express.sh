@@ -8,12 +8,14 @@ adapter_detect() {
 
 adapter_needs_unit() { return 0; }
 
-adapter_build() {
-  npm ci || return 1
-  # Build if a build script exists (NestJS/TS); skip if absent.
-  if jq -e '.scripts.build // empty' package.json >/dev/null 2>&1; then
-    npm run build || return 1
-  fi
+adapter_build_cmd() {
+  cat <<'CMD'
+{ npm ci --ignore-scripts || npm ci; } || exit 1
+# Build if a build script exists (NestJS/TS); skip if absent.
+if jq -e '.scripts.build // empty' package.json >/dev/null 2>&1; then
+  npm run build || exit 1
+fi
+CMD
 }
 
 adapter_start_cmd() {

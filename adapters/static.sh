@@ -8,13 +8,15 @@ adapter_detect() {
 
 adapter_needs_unit() { return 1; }
 
-adapter_build() {
-  # If the project has a build step (Vite/CRA), build into the static directory.
-  if [[ -f "$SITE_ROOT/package.json" ]] && jq -e '.scripts.build // empty' "$SITE_ROOT/package.json" >/dev/null 2>&1; then
-    npm ci || return 1
-    npm run build || return 1
-  fi
-  return 0
+adapter_build_cmd() {
+  cat <<'CMD'
+# If the project has a build step (Vite/CRA), build into the static directory.
+# A plain upload of a prebuilt dist/ has no package.json — nothing to do then.
+if [ -f package.json ] && jq -e '.scripts.build // empty' package.json >/dev/null 2>&1; then
+  { npm ci --ignore-scripts || npm ci; } || exit 1
+  npm run build || exit 1
+fi
+CMD
 }
 
 # Static does not need ExecStart.

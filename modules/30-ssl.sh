@@ -63,7 +63,8 @@ cmd_ssl_issue() {
   _ssl_enable_hsts
   state_site_set_field "$domain" ssl true
   state_site_set_field "$domain" ssl_method "\"$method\""
-  nginx -t && systemctl reload nginx
+  nginx -t || die "nginx -t failed after issuing the cert — check /etc/nginx/sites-available/lapn-*.conf."
+  systemctl reload nginx
   audit "OK" "ssl:issue $domain method=$method"
   log_ok "SSL ($method) issued for $domain."
 }
@@ -123,10 +124,9 @@ _ssl_issue_dns_cf() {
         -d "$domain" --agree-tos --non-interactive \
         $(_ssl_email_flag "$email") ${SSL_DRYRUN:+--dry-run} \
     || die "certbot DNS-01 failed."
-  _ssl_wire_cert_into_nginx "$domain" "/etc/letsencrypt/live/$domain"
-  # Site behind Cloudflare → enable real-IP snippet.
+  # Set behind_cloudflare BEFORE wiring: the re-render picks the real-IP snippet up.
   state_site_set_field "$domain" behind_cloudflare true
-  _ssl_enable_cf_realip "$domain"
+  _ssl_wire_cert_into_nginx "$domain" "/etc/letsencrypt/live/$domain"
 }
 
 _ssl_issue_cf_origin() {
@@ -144,76 +144,35 @@ _ssl_issue_cf_origin() {
   cat >"$dir/origin.key"
   chmod 600 "$dir/origin.key"
   [[ -s "$dir/origin.pem" && -s "$dir/origin.key" ]] || die "Cert/key is empty."
-  _ssl_wire_cert_into_nginx "$domain" "$dir" "origin.pem" "origin.key"
+  # Set behind_cloudflare BEFORE wiring: the re-render picks the real-IP snippet up.
   state_site_set_field "$domain" behind_cloudflare true
-  _ssl_enable_cf_realip "$domain"
+  _ssl_wire_cert_into_nginx "$domain" "$dir" "origin.pem" "origin.key"
   log_info "Set SSL mode = Full (strict) on Cloudflare for $domain."
 }
 
-# Insert listen 443 + cert paths into the site's nginx conf (for dns-cf / cf-origin).
+# Add the :443 server block for dns-cloudflare / cf-origin (certbot-nginx writes its own).
+# The :80 block is re-rendered from the templates first, which (a) recreates the shared
+# body snippet both blocks include — so security headers, rate limits, the Cloudflare
+# real-IP include and, for static sites, `root` are identical on HTTP and HTTPS — and
+# (b) drops any previous :443 block, making a re-issue idempotent.
 _ssl_wire_cert_into_nginx() {
   local domain="$1" certdir="$2" cert="${3:-fullchain.pem}" key="${4:-privkey.pem}"
   local name; name="$(state_site_get "$domain" name)"
   local conf="/etc/nginx/sites-available/lapn-${name}.conf"
-  [[ -f "$conf" ]] || die "nginx conf for $domain not found."
-  if grep -q "listen 443" "$conf"; then
-    log_info "nginx conf already has a 443 block — skipping."
-    return 0
-  fi
-  cat >>"$conf" <<EOF
-
-server {
-    listen 443 ssl http2;
-    listen [::]:443 ssl http2;
-    server_name ${domain};
-
-    ssl_certificate     ${certdir}/${cert};
-    ssl_certificate_key ${certdir}/${key};
-    ssl_protocols TLSv1.2 TLSv1.3;
-    ssl_prefer_server_ciphers off;
-
-    include /etc/nginx/snippets/lapn-https-locations-${name}.conf;
-}
-EOF
-  # Extract the location parts of the 80 block into a shared include — simple: copy proxy_pass.
-  _ssl_extract_locations "$conf" "$name"
-}
-
-# Extract the locations from the 80 server block into a snippet for the 443 block to include.
-_ssl_extract_locations() {
-  local conf="$1" name="$2"
-  local snip="/etc/nginx/snippets/lapn-https-locations-${name}.conf"
-  # Grab every location { ... } block in the original conf file.
-  awk '/location[ ]/{f=1} f{print} f&&/^\}/{ }' "$conf" | sed -n '/location/,/^}/p' >"$snip" 2>/dev/null || true
-  if [[ ! -s "$snip" ]]; then
-    # Fallback: generic proxy to the port.
-    local port; port="$(jq -r --arg n "$name" '.sites | to_entries[] | select(.value.name==$n) | .value.port' "$LAPN_STATE")"
-    cat >"$snip" <<EOF
-location / {
-    proxy_pass http://127.0.0.1:${port};
-    proxy_set_header Host \$host;
-    proxy_set_header X-Real-IP \$remote_addr;
-    proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto \$scheme;
-}
-EOF
-  fi
+  site_render_nginx "$domain" || die "Rendering the nginx config for $domain failed."
+  # Left over from LapN < 0.3, when the locations were copied instead of shared.
+  rm -f "/etc/nginx/snippets/lapn-https-locations-${name}.conf"
+  sed -e "s#{{DOMAIN}}#${domain}#g" \
+      -e "s#{{NAME}}#${name}#g" \
+      -e "s#{{CERT}}#${certdir}/${cert}#g" \
+      -e "s#{{KEY}}#${certdir}/${key}#g" \
+      "$LAPN_HOME/templates/nginx/https.conf.tpl" >>"$conf"
 }
 
 _ssl_enable_hsts() {
   local snip="/etc/nginx/snippets/lapn-security-headers.conf"
   [[ -f "$snip" ]] || return 0
   sed -i 's|^#add_header Strict-Transport-Security|add_header Strict-Transport-Security|' "$snip"
-}
-
-_ssl_enable_cf_realip() {
-  local domain="$1" name; name="$(state_site_get "$domain" name)"
-  local conf="/etc/nginx/sites-available/lapn-${name}.conf"
-  local inc="include /etc/nginx/snippets/lapn-cloudflare-realip.conf;"
-  # Ensure the snippet is installed (install.sh installs it); insert the include into the conf if missing.
-  if [[ -f "$conf" ]] && ! grep -q "cloudflare-realip" "$conf"; then
-    sed -i "s|server_name ${domain};|server_name ${domain};\n    ${inc}|" "$conf"
-  fi
 }
 
 cmd_ssl_renew() {

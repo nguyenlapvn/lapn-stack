@@ -61,9 +61,17 @@ _self_sync_assets() {
         /etc/nginx/conf.d/lapn-ratelimit.conf
   cp -f "$LAPN_HOME/templates/nginx/default-444.conf" \
         /etc/nginx/sites-available/lapn-default-444.conf
+  # :443 catch-all — only with a cert to present, else nginx -t would fail.
+  if [[ -f /etc/ssl/certs/ssl-cert-snakeoil.pem && -f /etc/ssl/private/ssl-cert-snakeoil.key ]]; then
+    cp -f "$LAPN_HOME/templates/nginx/default-444-ssl.conf" \
+          /etc/nginx/sites-available/lapn-default-444-ssl.conf
+    ln -sf /etc/nginx/sites-available/lapn-default-444-ssl.conf \
+           /etc/nginx/sites-enabled/lapn-default-444-ssl.conf
+  fi
 
   # logrotate is safe to overwrite (not mutated).
-  cp -f "$LAPN_HOME/templates/logrotate/lapn.tpl" /etc/logrotate.d/lapn
+  sed -e "s#{{SITES_HOME}}#${LAPN_SITES_HOME:-/home/sites}#g" \
+      "$LAPN_HOME/templates/logrotate/lapn.tpl" >/etc/logrotate.d/lapn
 
   if nginx -t >/dev/null 2>&1; then
     systemctl reload nginx 2>/dev/null || true

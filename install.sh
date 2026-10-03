@@ -37,7 +37,10 @@ fi
 say "Installing base packages"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -y
-apt-get install -y curl git jq nginx ufw fail2ban unzip openssl ca-certificates logrotate
+# nginx IS installed here (unlike 'lapn stack:install') because the steps below
+# configure the base vhosts. ssl-cert provides the snakeoil cert used by the :443
+# catch-all server that blocks access by IP / unknown SNI.
+apt-get install -y curl git jq nginx ufw fail2ban unzip openssl ca-certificates logrotate ssl-cert
 ok "Base packages done."
 
 # --- 3) fnm ---
@@ -68,12 +71,17 @@ chmod +x "$LAPN_HOME/bin/lapn"
 ln -sf "$LAPN_HOME/bin/lapn" /usr/local/bin/lapn
 ok "lapn -> /usr/local/bin/lapn"
 
+# Single source of truth for paths/limits (LAPN_SITES_HOME, LAPN_JOURNALD_MAX_USE, ...).
+# shellcheck source=config/defaults.conf
+. "$LAPN_HOME/config/defaults.conf"
+
 # --- 5) /etc/lapn + state + config ---
 say "Initializing /etc/lapn"
 mkdir -p /etc/lapn/secrets /var/log/lapn
 chmod 700 /etc/lapn/secrets
 if [[ ! -f /etc/lapn/sites.json ]]; then
-  jq -n '{schema_version:1, services:{}, sites:{}}' >/etc/lapn/sites.json
+  jq -n --argjson v "${LAPN_SCHEMA_VERSION:-2}" \
+    '{schema_version:$v, services:{}, sites:{}, databases:[]}' >/etc/lapn/sites.json
   chmod 600 /etc/lapn/sites.json
 fi
 # config: detect the current SSH port.
@@ -94,20 +102,29 @@ cp -f "$LAPN_HOME/templates/nginx/snippets/cloudflare-realip.conf" /etc/nginx/sn
 cp -f "$LAPN_HOME/templates/nginx/snippets/ratelimit.conf"         /etc/nginx/conf.d/lapn-ratelimit.conf
 cp -f "$LAPN_HOME/templates/nginx/default-444.conf"                /etc/nginx/sites-available/lapn-default-444.conf
 ln -sf /etc/nginx/sites-available/lapn-default-444.conf /etc/nginx/sites-enabled/lapn-default-444.conf
+# Same for TLS, but only with a cert to present — otherwise nginx -t would fail.
+if [[ -f /etc/ssl/certs/ssl-cert-snakeoil.pem && -f /etc/ssl/private/ssl-cert-snakeoil.key ]]; then
+  cp -f "$LAPN_HOME/templates/nginx/default-444-ssl.conf" /etc/nginx/sites-available/lapn-default-444-ssl.conf
+  ln -sf /etc/nginx/sites-available/lapn-default-444-ssl.conf /etc/nginx/sites-enabled/lapn-default-444-ssl.conf
+else
+  warn "Snakeoil cert missing — skipping the :443 catch-all (https://<IP> will hit the first site)."
+fi
 # Remove Ubuntu's default site (avoid duplicate default_server).
 rm -f /etc/nginx/sites-enabled/default
 nginx -t && systemctl reload nginx && ok "Base Nginx OK." || warn "nginx -t failed — check the configuration."
 
 # logrotate
-cp -f "$LAPN_HOME/templates/logrotate/lapn.tpl" /etc/logrotate.d/lapn
+sed -e "s#{{SITES_HOME}}#${LAPN_SITES_HOME:-/home/sites}#g" \
+    "$LAPN_HOME/templates/logrotate/lapn.tpl" >/etc/logrotate.d/lapn
 ok "logrotate installed."
 # journald cap
+jmax="${LAPN_JOURNALD_MAX_USE:-500M}"
 if ! grep -qE '^\s*SystemMaxUse=' /etc/systemd/journald.conf; then
-  sed -i 's/^#\?SystemMaxUse=.*/SystemMaxUse=500M/' /etc/systemd/journald.conf 2>/dev/null \
-    || printf '\nSystemMaxUse=500M\n' >>/etc/systemd/journald.conf
+  sed -i "s/^#\?SystemMaxUse=.*/SystemMaxUse=${jmax}/" /etc/systemd/journald.conf 2>/dev/null \
+    || printf '\nSystemMaxUse=%s\n' "$jmax" >>/etc/systemd/journald.conf
   systemctl restart systemd-journald 2>/dev/null || true
 fi
-ok "journald cap 500M."
+ok "journald cap ${jmax}."
 
 # --- 7) Ask to change the SSH port (anti-lockout) ---
 if [[ -z "$UPDATE_MODE" && -t 0 ]]; then
@@ -118,22 +135,14 @@ if [[ -z "$UPDATE_MODE" && -t 0 ]]; then
   fi
 fi
 
-# --- 8) UFW ---
-say "Configuring firewall (UFW)"
-ufw --force default deny incoming
-ufw --force default allow outgoing
-ufw allow 80/tcp; ufw allow 443/tcp; ufw allow "${cur_ssh}/tcp"
-if [[ -t 0 ]]; then
-  read -r -p "Enable UFW now? (make sure you can get in via port ${cur_ssh}) [Y/n] " ans || true
-  [[ "${ans:-Y}" =~ ^[Nn] ]] || { ufw --force enable; ok "UFW enabled."; }
-else
-  warn "Non-interactive — NOT enabling UFW automatically. Run 'lapn security:firewall' when ready."
-fi
-
-# --- 9) fail2ban ---
-say "fail2ban"
-/usr/local/bin/lapn security:harden >/dev/null 2>&1 || {
-  # minimal fallback jail
+# --- 8) Firewall + fail2ban + baseline hardening ---
+# One call, not a hand-rolled UFW block plus 'security:harden' (which repeats it):
+# the duplicate prompted twice, and with stdout redirected the second prompt read from
+# this script's own stdin. security:harden writes the UFW rules and, when there is no
+# TTY to confirm on, leaves UFW disabled instead of guessing.
+say "Applying baseline hardening (UFW rules, fail2ban, unattended-upgrades, sysctl)"
+if ! /usr/local/bin/lapn security:harden; then
+  warn "lapn security:harden did not finish — installing a minimal fail2ban jail as a fallback."
   cat >/etc/fail2ban/jail.d/lapn.conf <<EOF
 [sshd]
 enabled = true
@@ -141,13 +150,15 @@ port    = ${cur_ssh}
 backend = systemd
 EOF
   systemctl enable --now fail2ban 2>/dev/null || true
-}
-ok "fail2ban configured."
+fi
 
-# --- 10) Summary ---
+# --- 9) Summary ---
 ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || echo '<IP>')"
 printf '\n%s%s✓ LapN installed successfully%s\n' "$c_g" "$c_b" "$c_0"
 printf '  Server IP : %s\n' "$ip"
 printf '  SSH port  : %s%s%s  (use: ssh -p %s ...)\n' "$c_b" "$cur_ssh" "$c_0" "$cur_ssh"
 printf '  Command   : lapn   (menu)  |  lapn site:create   |  lapn doctor\n'
+if ! ufw status 2>/dev/null | grep -q "Status: active"; then
+  printf '  %s[!]%s UFW is NOT enabled yet — run: %slapn security:firewall%s\n' "$c_y" "$c_0" "$c_b" "$c_0"
+fi
 printf '\nGet started: %slapn site:create%s\n' "$c_b" "$c_0"

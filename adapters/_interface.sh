@@ -8,7 +8,10 @@
 #
 # adapter_detect       -> return 0 if the app type can be auto-detected from $SITE_ROOT/package.json
 # adapter_needs_unit    -> return 0 if a systemd unit is needed (static = 1/false)
-# adapter_build         -> build the app (npm ci && npm run build...), run under the site user
+# adapter_build_cmd     -> print the shell snippet that installs deps + builds. The caller
+#                          runs it via `sudo -u $SITE_USER bash -lc` with cwd=$SITE_ROOT,
+#                          so it must `exit 1` on failure. Both site:create and
+#                          deploy:rebuild use this — there is no second build code path.
 # adapter_start_cmd     -> print the full ExecStart (node path + entrypoint)
 # adapter_env_defaults  -> print the KEY=VALUE lines added to .env
 # adapter_health_url    -> print the health check path (default /)
@@ -16,10 +19,14 @@
 # --- Defaults (adapters may override) ---
 adapter_detect()       { return 1; }
 adapter_needs_unit()   { return 0; }
-adapter_build()        { return 0; }
 adapter_start_cmd()    { printf ''; }
 adapter_env_defaults() { printf ''; }
 adapter_health_url()   { printf '/'; }
+adapter_build_cmd() {
+  cat <<'CMD'
+{ npm ci --ignore-scripts || npm ci; } || exit 1
+CMD
+}
 
 # node_bin_for <user> <node_version> -> print the user's node path via fnm.
 # fnm is installed per-user; fall back to the system node if not found.

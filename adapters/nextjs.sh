@@ -8,10 +8,11 @@ adapter_detect() {
 
 adapter_needs_unit() { return 0; }
 
-adapter_build() {
-  # Run by the caller under sudo -u $SITE_USER, cwd=$SITE_ROOT.
-  npm ci || return 1
-  npm run build || return 1
+adapter_build_cmd() {
+  cat <<'CMD'
+{ npm ci --ignore-scripts || npm ci; } || exit 1
+npm run build || exit 1
+CMD
 }
 
 adapter_start_cmd() {

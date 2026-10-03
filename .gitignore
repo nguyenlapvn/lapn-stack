@@ -1,1 +1,3 @@
-docs
+# Thiết kế nội bộ (docs/plan.md) — không publish cùng repo cài đặt.
+# Scope về root để không ăn luôn docs/ ở thư mục con nào khác.
+/docs

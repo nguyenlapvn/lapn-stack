@@ -29,10 +29,23 @@ ui_password() {
 }
 
 # ui_confirm "question" [Y|N default] -> return 0 if yes.
+# Never prompts without a TTY: a `read` on a pipe either returns EOF (and would silently
+# take the default) or steals the caller's stdin — e.g. the rest of the script when LapN
+# is installed via `curl ... | sudo bash`. Callers that must not act on a default in
+# non-interactive mode have to check LAPN_INTERACTIVE themselves.
 ui_confirm() {
   local prompt="$1" default="${2:-N}" ans hint
   [[ "$default" == "Y" ]] && hint="[Y/n]" || hint="[y/N]"
-  read -r -p "$(printf '%s %s ' "$prompt" "$hint")" ans || true
+  if [[ "${LAPN_INTERACTIVE:-0}" != "1" ]]; then
+    log_info "$prompt $hint -> $default (non-interactive)"
+    [[ "$default" == "Y" ]]
+    return
+  fi
+  if ! read -r -p "$(printf '%s %s ' "$prompt" "$hint")" ans; then
+    printf '\n'
+    [[ "$default" == "Y" ]]
+    return
+  fi
   ans="${ans:-$default}"
   [[ "$ans" =~ ^[Yy] ]]
 }

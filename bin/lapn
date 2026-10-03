@@ -149,7 +149,8 @@ main() {
   fi
   case "$1" in
     help|-h|--help) lapn_help ;;
-    version|-v|--version) printf 'lapn %s\n' "$(cat "$LAPN_HOME/VERSION" 2>/dev/null || echo '0.1.0')" ;;
+    # Delegated so there is one implementation (cmd_version also prints the git rev).
+    version|-v|--version) core_dispatch version ;;
     *) core_dispatch "$@" ;;
   esac
 }

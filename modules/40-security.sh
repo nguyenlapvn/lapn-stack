@@ -31,8 +31,18 @@ _sec_persist_ssh_port() {
   export LAPN_SSH_PORT="$port"
 }
 
+# security:firewall [--enable]
+# Writes the UFW rules, then enables UFW only on an explicit yes — never on a default
+# taken because there was no TTY to ask on: a wrong SSH port here locks the admin out.
 cmd_security_firewall() {
   core_require_root
+  local want_enable=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --enable) want_enable=1; shift ;;
+      *) shift ;;
+    esac
+  done
   command -v ufw >/dev/null 2>&1 || die "ufw is not installed."
   local ssh_port; ssh_port="$(_sec_ssh_port)"
   log_step "Configure UFW (deny incoming, allow 80/443/${ssh_port})"
@@ -41,7 +51,14 @@ cmd_security_firewall() {
   ufw allow 80/tcp
   ufw allow 443/tcp
   ufw allow "${ssh_port}/tcp"
-  if ui_confirm "Enable UFW now? (make sure you can get in via port ${ssh_port})" Y; then
+
+  if [[ -n "$want_enable" ]]; then
+    ufw --force enable
+    log_ok "UFW enabled."
+  elif [[ "${LAPN_INTERACTIVE:-0}" != "1" ]]; then
+    log_warn "Non-interactive — rules written but UFW NOT enabled."
+    log_warn "Enable it from a terminal: lapn security:firewall   (or: lapn security:firewall --enable)"
+  elif ui_confirm "Enable UFW now? (make sure you can get in via port ${ssh_port})" Y; then
     ufw --force enable
     log_ok "UFW enabled."
   fi
@@ -51,7 +68,7 @@ cmd_security_firewall() {
 cmd_security_harden() {
   core_require_root
   log_step "Basic hardening"
-  cmd_security_firewall
+  cmd_security_firewall "$@"   # forwards --enable
   _sec_fail2ban
   _sec_unattended_upgrades
   _sec_sysctl
@@ -105,11 +122,14 @@ EOF
   sysctl --system >/dev/null 2>&1 || true
 }
 
-# security:ssh [--port N] [--no-root] [--no-password]
+# security:ssh [--port N] [--no-root | --allow-root] [--no-password]
 # Change the port following the ANTI-LOCKOUT flow.
+# PermitRootLogin is left exactly as the system has it unless --no-root (deny) or
+# --allow-root (key-only) is passed: most VPS images hand out root-only access, and
+# install.sh calls this command just to change the port.
 cmd_security_ssh() {
   core_require_root
-  local new_port="" no_root=1 no_pw=""
+  local new_port="" no_root="" no_pw=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --port) new_port="$2"; shift 2 ;;
@@ -202,19 +222,45 @@ _sec_harden_sshd_config() {
   local no_root="$1" no_pw="$2"
   local drop="/etc/ssh/sshd_config.d/lapn-harden.conf"
   mkdir -p /etc/ssh/sshd_config.d
-  {
-    [[ "$no_root" == "1" ]] && printf 'PermitRootLogin no\n'
-    if [[ "$no_pw" == "1" ]]; then
-      # Safety: only disable password if the calling user (via SUDO_USER) already has authorized_keys.
-      local u="${SUDO_USER:-root}" h
-      h="$(getent passwd "$u" | cut -d: -f6)"
-      if [[ -s "$h/.ssh/authorized_keys" ]]; then
-        printf 'PasswordAuthentication no\n'
-        printf 'PubkeyAuthentication yes\n'
-      else
-        log_warn "User $u does NOT have authorized_keys yet — KEEPING password auth to avoid lockout."
-      fi
+
+  # The file is rewritten from scratch every time, so whatever is in it now has to be
+  # read BEFORE the truncating redirect and carried over whenever this run is not the
+  # one changing that setting. Without this, `security:ssh --port N` (or a refused
+  # --no-root) would silently re-open root/password login that an earlier run closed.
+  local keep_root="" keep_pw=""
+  if [[ -f "$drop" ]]; then
+    keep_root="$(grep -E '^PermitRootLogin ' "$drop" || true)"
+    keep_pw="$(grep -E '^(PasswordAuthentication|PubkeyAuthentication) ' "$drop" || true)"
+  fi
+
+  # Decide the two lines first; the brace group below only prints.
+  local out_root="$keep_root" out_pw="$keep_pw"
+  if [[ "$no_root" == "1" ]]; then
+    # Never deny root while root is the only admin we can see: that locks this session out.
+    local su="${SUDO_USER:-}"
+    if [[ -z "$su" || "$su" == "root" ]]; then
+      log_warn "Keeping PermitRootLogin as is: this session is root and no other admin user was detected."
+      log_warn "Create a sudo user with an SSH key first, then re-run: lapn security:ssh --no-root"
+    else
+      out_root="PermitRootLogin no"
     fi
+  elif [[ "$no_root" == "0" ]]; then
+    out_root="PermitRootLogin prohibit-password"
+  fi
+  if [[ "$no_pw" == "1" ]]; then
+    # Safety: only disable password if the calling user (via SUDO_USER) already has authorized_keys.
+    local u="${SUDO_USER:-root}" h
+    h="$(getent passwd "$u" | cut -d: -f6)"
+    if [[ -s "$h/.ssh/authorized_keys" ]]; then
+      out_pw=$'PasswordAuthentication no\nPubkeyAuthentication yes'
+    else
+      log_warn "User $u does NOT have authorized_keys yet — KEEPING password auth to avoid lockout."
+    fi
+  fi
+
+  {
+    [[ -n "$out_root" ]] && printf '%s\n' "$out_root"
+    [[ -n "$out_pw" ]] && printf '%s\n' "$out_pw"
     printf 'X11Forwarding no\n'
     printf 'MaxAuthTries 3\n'
   } >"$drop"

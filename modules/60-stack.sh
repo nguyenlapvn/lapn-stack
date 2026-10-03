@@ -18,7 +18,8 @@ cmd_stack_install() {
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -y
   # Nginx is NOT bundled here — install it via the dedicated 'Nginx' entry (stack:nginx).
-  apt-get install -y curl git jq ufw fail2ban unzip openssl ca-certificates logrotate
+  # (install.sh does install nginx, because it configures the base vhosts right away.)
+  apt-get install -y curl git jq ufw fail2ban unzip openssl ca-certificates logrotate ssl-cert
   log_ok "Base packages installed."
 
   _stack_install_fnm
@@ -109,6 +110,7 @@ cmd_stack_status() {
 }
 
 # Convenience function for other modules: install a Node version for a specific site user.
+# Returns non-zero instead of calling die() so the caller can roll back first.
 stack_install_node_for_user() {
   local user="$1" ver="$2"
   log_info "Installing Node v$ver for user $user"
@@ -116,7 +118,7 @@ stack_install_node_for_user() {
     export FNM_DIR=\"\$HOME/.local/share/fnm\"
     eval \"\$(fnm env --shell bash 2>/dev/null)\" || true
     fnm install $ver && fnm default $ver
-  " || die "Installing Node v$ver for $user failed."
+  " || { log_error "Installing Node v$ver for $user failed."; return 1; }
 }
 
 # =====================================================================

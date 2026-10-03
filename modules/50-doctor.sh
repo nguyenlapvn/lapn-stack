@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# modules/90-doctor.sh — full server audit. Output ✅/⚠️/❌.
+# modules/50-doctor.sh — full server audit. Output ✅/⚠️/❌.
 
 MODULE_NAME="Diagnostics"
 MODULE_ORDER=50
@@ -136,7 +136,14 @@ _dr_check_sites() {
       else
         _dr_ok "app bind localhost:${port}"
       fi
-      systemctl is-active --quiet "lapn-${name}.service" && _dr_ok "unit active" || _dr_err "unit not running"
+      if [[ ! -f "/etc/systemd/system/lapn-${name}.service" ]]; then
+        # A site created without code has no unit until its first deploy — expected.
+        _dr_warn "no unit yet — deploy with: lapn deploy:git --domain $domain --git <url>"
+      elif systemctl is-active --quiet "lapn-${name}.service"; then
+        _dr_ok "unit active"
+      else
+        _dr_err "unit not running"
+      fi
     fi
 
     # SSL method vs Cloudflare
