@@ -53,6 +53,37 @@ lapn site:create --domain app.example.vn --type express
 lapn deploy:git  --domain app.example.vn --git git@github.com:you/app.git
 ```
 
+### Node version
+
+Mặc định là Node **24**. Node 20 đã hết hạn hỗ trợ từ 04/2026 nên không dùng làm mặc định nữa.
+
+Trong menu: **Stack › Node versions** — xem default hiện tại + các version đã cài, cài thêm version, đổi default, hoặc chuyển một site đang chạy sang version khác.
+
+```
+LapN › Stack › Node
+
+  Default for NEW sites : v24
+  Installed for root    :
+      * v20.19.0
+      * v24.9.0 default
+
+  1) Install a Node version
+  2) Set the default for NEW sites
+  3) Switch an EXISTING site to another version
+```
+
+Mỗi site **pin** version riêng trong `sites.json` lúc tạo, nên đổi mặc định không đụng gì tới site đang chạy — đó là lý do mục 2 và mục 3 tách riêng. Tương đương ở CLI:
+
+```bash
+lapn stack:node 24 --default        # đổi mặc định cho site TẠO MỚI (+ cài cho root)
+lapn site:node --domain app.example.vn --node 24   # chuyển 1 site đang chạy sang 24
+lapn site:create --domain x.vn --node 24           # pin ngay lúc tạo
+```
+
+`stack:node` chạy không kèm `--default` trong terminal sẽ hỏi có muốn đặt làm mặc định không. Nó ghi `LAPN_NODE_DEFAULT` vào `/etc/lapn/config` — file này được source **sau** `config/defaults.conf` nên override được mọi biến `LAPN_*`; `config/defaults.conf` trong repo là code, không sửa trực tiếp trên server.
+
+`site:node` cài version mới cho user của site, **build lại** (native module biên dịch theo ABI cũ), rewrite unit systemd rồi restart + health check. Chạy với đúng version hiện tại thì nó chỉ re-render unit — đây cũng là cách sửa các site tạo bằng LapN < 0.3.2 (unit của chúng bị trỏ `ExecStart=/usr/bin/node`).
+
 ### SSL
 
 | `--method` | Khi nào dùng | Cần gì |

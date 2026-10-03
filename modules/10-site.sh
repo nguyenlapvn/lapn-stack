@@ -3,7 +3,7 @@
 
 MODULE_NAME="Site management"
 MODULE_ORDER=10
-MODULE_COMMANDS=("site:create" "site:list" "site:info" "site:delete" \
+MODULE_COMMANDS=("site:create" "site:list" "site:info" "site:node" "site:delete" \
                  "deploy:git" "deploy:rebuild" "deploy:restart" "deploy:logs")
 
 # --- Rollback stack: push undo commands, run them in reverse on failure ---
@@ -52,7 +52,7 @@ cmd_site_create() {
 
   # 3) node version (not required for static but still asked for consistency)
   local node; node="$(resolve_input "node" "$ARG_NODE" \
-    --prompt "Node version" --default "${LAPN_NODE_DEFAULT:-20}")"
+    --prompt "Node version" --default "${LAPN_NODE_DEFAULT:-24}" --validate validate_node_version)"
 
   # 4) name, port, user
   local name; name="$(slugify_domain "$domain")"
@@ -410,6 +410,67 @@ cmd_site_info() {
   state_site_get "$domain" | jq .
   local name; name="$(state_site_get "$domain" name)"
   printf '\nsystemd: %s\n' "$(systemctl is-active "lapn-${name}.service" 2>/dev/null || echo 'n/a')"
+}
+
+# --- change the pinned Node version ---
+# site:node --domain <d> [--node <ver>]
+# Re-renders the unit even when the version does not change, which is also the repair
+# path for units written by LapN < 0.3.2 (those got ExecStart=/usr/bin/node).
+cmd_site_node() {
+  core_require_root
+  _parse_args "$@"
+  state_init
+  local domain; domain="$(resolve_input "domain" "$ARG_DOMAIN" \
+    --prompt "Domain" --validate validate_domain)"
+  state_site_exists "$domain" || die "No site '$domain'."
+  _dep_load_site "$domain"
+
+  local cur="$SITE_NODE"
+  local ver; ver="$(resolve_input "node" "$ARG_NODE" \
+    --prompt "Node version for $domain (current: v$cur)" --default "$cur" \
+    --validate validate_node_version)"
+
+  if [[ "$ver" == "$cur" ]]; then
+    log_info "Already pinned to Node v$cur — re-rendering the unit only."
+  else
+    log_step "Switching $domain from Node v$cur to v$ver"
+    stack_install_node_for_user "$SITE_USER" "$ver" \
+      || die "Installing Node v$ver for $SITE_USER failed — site untouched."
+    state_site_set_field "$domain" node_version "\"$ver\""
+    SITE_NODE="$ver"
+  fi
+
+  _dep_load_adapter
+
+  # Native modules are built against the old ABI, so a version change needs a rebuild.
+  if [[ "$ver" != "$cur" ]] && _site_has_app "$SITE_ROOT"; then
+    log_step "Rebuilding against Node v$ver"
+    _site_build_as_user "$SITE_USER" "$SITE_ROOT" \
+      || die "Build failed on Node v$ver — run 'lapn site:node --domain $domain --node $cur' to go back."
+  fi
+
+  if [[ "$SITE_TYPE" == "static" ]]; then
+    audit "OK" "site:node $domain $cur->$ver"
+    log_ok "$domain pinned to Node v$ver (static — no unit to restart)."
+    return 0
+  fi
+  if ! _site_has_app "$SITE_ROOT"; then
+    audit "OK" "site:node $domain $cur->$ver"
+    log_ok "$domain pinned to Node v$ver — the unit is created by the first deploy."
+    return 0
+  fi
+
+  # ExecStart carries the absolute node path, so the unit has to be rewritten.
+  local home="${LAPN_SITES_HOME}/${SITE_NAME}" envfile="${LAPN_SECRETS}/${SITE_NAME}/.env"
+  _site_render_unit "$domain" "$SITE_NAME" "$SITE_USER" "$SITE_ROOT" "$home" "$envfile" "$SITE_PORT"
+  systemctl daemon-reload
+  systemctl enable --now "lapn-${SITE_NAME}.service" >/dev/null 2>&1 || true
+  systemctl restart "lapn-${SITE_NAME}.service" \
+    || die "Restart failed — see: journalctl -u lapn-${SITE_NAME} -n 50"
+  _site_health_check "$SITE_PORT" "$(adapter_health_url)" \
+    || log_warn "Health check did not pass — check journalctl -u lapn-${SITE_NAME}"
+  audit "OK" "site:node $domain $cur->$ver"
+  log_ok "$domain now runs Node v$ver."
 }
 
 # --- delete ---

@@ -15,6 +15,25 @@ core_load_config() {
   fi
 }
 
+# core_config_set <LAPN_KEY> <value> — persist an override into /etc/lapn/config and
+# apply it to the running process. That file is sourced AFTER config/defaults.conf, so
+# whatever lands here wins. The repo's defaults.conf is never edited: it is code.
+core_config_set() {
+  local key="$1" value="$2" cfg="${LAPN_CONFIG:-/etc/lapn/config}"
+  [[ "$key" =~ ^LAPN_[A-Z0-9_]+$ ]] || { log_error "Invalid config key: '$key'"; return 1; }
+  mkdir -p "$(dirname "$cfg")"
+  [[ -f "$cfg" ]] || printf '# LapN config (override defaults)\n' >"$cfg"
+  # Rewrite in place rather than sed-substituting: the value is not escaped for sed,
+  # and keeping the original file keeps its mode/owner.
+  local tmp; tmp="$(mktemp)"
+  grep -vE "^${key}=" "$cfg" >"$tmp" 2>/dev/null || true
+  printf '%s="%s"\n' "$key" "$value" >>"$tmp"
+  cat "$tmp" >"$cfg"
+  rm -f "$tmp"
+  printf -v "$key" '%s' "$value"
+  export "${key?}"
+}
+
 # --- Load core libraries ---
 core_load_libs() {
   local lib

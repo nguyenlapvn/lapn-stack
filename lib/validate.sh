@@ -66,6 +66,17 @@ validate_db_ident() {
   return 1
 }
 
+# Node version accepted by fnm: a major[.minor[.patch]] (leading v optional) or one of
+# fnm's aliases. Catching a typo here matters: site:create rolls the whole site back
+# when the install fails, and the error from fnm on its own is cryptic.
+validate_node_version() {
+  local v="$1"
+  [[ "$v" =~ ^v?[0-9]+(\.[0-9]+){0,2}$ ]] && return 0
+  [[ "$v" =~ ^(latest|system|lts-latest|lts[/-][a-zA-Z]+)$ ]] && return 0
+  log_warn "Invalid Node version: '$v' (e.g. 24, 24.9.0, lts/jod, latest)"
+  return 1
+}
+
 # Valid app type.
 validate_app_type() {
   local t="$1"

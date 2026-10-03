@@ -21,14 +21,7 @@ sec_detect_ssh_port() {
 
 # Write ssh_port to /etc/lapn/config (create/replace key).
 _sec_persist_ssh_port() {
-  local port="$1" cfg="${LAPN_CONFIG:-/etc/lapn/config}"
-  touch "$cfg"
-  if grep -q '^LAPN_SSH_PORT=' "$cfg"; then
-    sed -i "s/^LAPN_SSH_PORT=.*/LAPN_SSH_PORT=${port}/" "$cfg"
-  else
-    printf 'LAPN_SSH_PORT=%s\n' "$port" >>"$cfg"
-  fi
-  export LAPN_SSH_PORT="$port"
+  core_config_set LAPN_SSH_PORT "$1"
 }
 
 # security:firewall [--enable]

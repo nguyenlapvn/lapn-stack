@@ -43,18 +43,42 @@ _stack_install_fnm() {
   log_ok "fnm: $(fnm --version)"
 }
 
-# stack:node [version] — install a Node version (default LTS from defaults).
-# Installs for the calling user; sites install per-user when created.
+# stack:node [version] [--default]
+# Install a Node version via fnm for the invoking user (root) — this is the Node that
+# `stack:pm2` and manual work use. Sites install their own pinned version per site user.
+# --default also writes LAPN_NODE_DEFAULT to /etc/lapn/config, i.e. the version NEW
+# sites get. Existing sites keep their pin; use `site:node` to move one of those.
 cmd_stack_node() {
   core_require_root
-  local ver="${1:-${LAPN_NODE_DEFAULT:-20}}"
+  local ver="" set_default=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --default) set_default=1; shift ;;
+      *) [[ -z "$ver" ]] && ver="$1"; shift ;;
+    esac
+  done
+  ver="$(resolve_input "node" "$ver" --prompt "Node version to install" \
+    --default "${LAPN_NODE_DEFAULT:-24}" --validate validate_node_version)"
+
   log_step "Installing Node v$ver (via fnm)"
   command -v fnm >/dev/null 2>&1 || _stack_install_fnm
   # fnm needs env; call within a subshell that evals env. Checked explicitly rather
   # than relying on set -e, which is suppressed when a caller uses `cmd_stack_node ||`.
   bash -lc "eval \"\$(fnm env --shell bash)\"; fnm install $ver && fnm default $ver" \
     || { log_error "Installing Node v$ver failed."; return 1; }
-  log_ok "Node v$ver installed and set as default."
+  log_ok "Node v$ver installed and set as the fnm default for this user."
+
+  # Offer it as the server-wide default for new sites.
+  if [[ -z "$set_default" && "$ver" != "${LAPN_NODE_DEFAULT:-}" && "${LAPN_INTERACTIVE:-0}" == "1" ]]; then
+    ui_confirm "Make Node v$ver the default for NEW sites (currently v${LAPN_NODE_DEFAULT:-24})?" Y \
+      && set_default=1
+  fi
+  if [[ -n "$set_default" ]]; then
+    core_config_set LAPN_NODE_DEFAULT "$ver" || return 1
+    audit "OK" "stack:node default=$ver"
+    log_ok "New sites will be created with Node v$ver (LAPN_NODE_DEFAULT in /etc/lapn/config)."
+    log_dim "Existing sites keep their pinned version — move one with: lapn site:node --domain <d> --node $ver"
+  fi
 }
 
 # stack:nginx — install Nginx (idempotent).
@@ -147,7 +171,7 @@ _STACK_KEYS=(base nginx node pm2 mariadb postgres mongo redis)
 _STACK_LABELS=(
   "Base packages (curl, git, jq, ufw, fail2ban, openssl, logrotate, fnm)"
   "Nginx"
-  "Node (fnm) — installs + defaults Node v${LAPN_NODE_DEFAULT:-20}"
+  "Node (fnm)"   # version is asked for; manage versions in Stack > Node
   "PM2 (process manager)"
   "MariaDB"
   "PostgreSQL"
@@ -219,14 +243,80 @@ stack_menu() {
     lapn_clear
     printf '%s%sLapN%s › Stack\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
     printf '  1) Install software\n'
-    printf '  2) Status\n'
+    printf '  2) Node versions  %s(default for new sites: v%s)%s\n' \
+      "$C_DIM" "${LAPN_NODE_DEFAULT:-24}" "$C_RESET"
+    printf '  3) Status\n'
     printf '  0) ← Back to main menu\n'
     read -r -p "→ " choice || return 0
     case "$choice" in
       1) stack_install_menu ;;
-      2) ( cmd_stack_status ) || true; lapn_pause ;;
+      2) stack_node_menu ;;
+      3) ( cmd_stack_status ) || true; lapn_pause ;;
       0|"") return 0 ;;
       *) log_warn "Invalid choice."; lapn_pause ;;
     esac
   done
+}
+
+# Node versions installed for the invoking user (root), as fnm reports them.
+_stack_node_list() {
+  bash -lc 'eval "$(fnm env --shell bash 2>/dev/null)"; fnm list 2>/dev/null' 2>/dev/null || true
+}
+
+# Stack > Node. Two different things live here on purpose: the default applies to sites
+# created FROM NOW ON, while every existing site keeps the version it was pinned to.
+stack_node_menu() {
+  local choice line found
+  while true; do
+    lapn_clear
+    printf '%s%sLapN%s › Stack › Node\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
+    printf '  Default for NEW sites : %s%s%s\n' \
+      "$C_BOLD" "v${LAPN_NODE_DEFAULT:-24}" "$C_RESET"
+    printf '  Installed for root    :\n'
+    found=""
+    while IFS= read -r line; do
+      [[ -z "${line//[[:space:]]/}" ]] && continue
+      printf '      %s\n' "$line"; found=1
+    done < <(_stack_node_list)
+    [[ -z "$found" ]] && printf '      %s(none yet — install one below)%s\n' "$C_DIM" "$C_RESET"
+    printf '\n'
+    printf '  1) Install a Node version\n'
+    printf '  2) Set the default for NEW sites\n'
+    printf '  3) Switch an EXISTING site to another version\n'
+    printf '  0) ← Back\n'
+    read -r -p "→ " choice || return 0
+    printf '\n'
+    case "$choice" in
+      1) ( cmd_stack_node ) || log_warn "Finished with an error (see above)."; lapn_pause ;;
+      # Not a subshell: core_config_set also updates the value in this process, which is
+      # what makes the header above refresh without restarting lapn.
+      2) stack_set_default_node || true; lapn_pause ;;
+      3) ( cmd_site_list ) || true
+         printf '\n'
+         ( core_dispatch "site:node" ) || log_warn "Finished with an error (see above)."
+         lapn_pause ;;
+      0|"") return 0 ;;
+      *) log_warn "Invalid choice."; lapn_pause ;;
+    esac
+  done
+}
+
+# Ask for and persist LAPN_NODE_DEFAULT. Existing sites are deliberately untouched.
+stack_set_default_node() {
+  if (( EUID != 0 )); then
+    log_error "Changing the default needs root (sudo)."
+    return 1
+  fi
+  local cur="${LAPN_NODE_DEFAULT:-24}" ver
+  ver="$(resolve_input "node" "" --prompt "Default Node version for NEW sites" \
+    --default "$cur" --validate validate_node_version)"
+  if [[ "$ver" == "$cur" ]]; then
+    log_info "Already v$cur — nothing changed."
+    return 0
+  fi
+  core_config_set LAPN_NODE_DEFAULT "$ver" || return 1
+  audit "OK" "stack:node default=$ver"
+  log_ok "New sites will be created with Node v$ver."
+  _stack_node_ready || log_warn "Note: root itself has no Node yet — use '1) Install a Node version' if you want pm2."
+  log_dim "Existing sites keep their pin — move one with '3) Switch an EXISTING site'."
 }

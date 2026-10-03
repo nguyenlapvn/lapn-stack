@@ -28,19 +28,30 @@ adapter_build_cmd() {
 CMD
 }
 
-# node_bin_for <user> <node_version> -> print the user's node path via fnm.
-# fnm is installed per-user; fall back to the system node if not found.
+# adapter_node_bin <user> <node_version> -> print the absolute node path for ExecStart.
+# fnm layout:  $FNM_DIR/node-versions/vX.Y.Z/installation/bin/node
+#              $FNM_DIR/aliases/default -> ../node-versions/vX.Y.Z/installation
+# The version the site was pinned to wins over anything a login shell or the system
+# happens to offer: that pin is what the unit must keep running after any upgrade.
 adapter_node_bin() {
-  local user="$1" ver="$2" home bin
+  local user="$1" ver="$2" home bin c
   home="$(getent passwd "$user" | cut -d: -f6)"
-  # fnm layout: ~/.local/share/fnm/node-versions/vXX.*/installation/bin/node
-  bin="$(sudo -u "$user" bash -lc "command -v node" 2>/dev/null || true)"
-  if [[ -n "$bin" ]]; then printf '%s' "$bin"; return 0; fi
-  # Try to find it in the fnm dir.
-  local found
-  found="$(find "$home/.local/share/fnm/node-versions" -maxdepth 3 -name node -type f 2>/dev/null \
-            | grep "/v${ver}" | head -n1 || true)"
-  [[ -n "$found" ]] && { printf '%s' "$found"; return 0; }
+  local fnm_dir="${home}/.local/share/fnm"
+
+  # Exact pin. Two patterns so both "24" and "24.9.0" resolve.
+  # -f, not -x: if the binary is there but somehow not executable, pointing ExecStart
+  # at it gets a 203/EXEC naming that exact path, which beats silently falling through
+  # to a /usr/bin/node that nothing ever installed.
+  for c in "$fnm_dir"/node-versions/"v${ver}"/installation/bin/node \
+           "$fnm_dir"/node-versions/"v${ver}".*/installation/bin/node; do
+    [[ -f "$c" ]] && { printf '%s' "$c"; return 0; }
+  done
+  # Whatever `fnm default` points at for this user.
+  [[ -f "$fnm_dir/aliases/default/bin/node" ]] && {
+    printf '%s' "$fnm_dir/aliases/default/bin/node"; return 0; }
+  # A login shell with fnm wired up, or a system-wide node.
+  bin="$(sudo -u "$user" bash -lc 'command -v node' 2>/dev/null || true)"
+  [[ -n "$bin" ]] && { printf '%s' "$bin"; return 0; }
   printf '/usr/bin/node'
 }
 

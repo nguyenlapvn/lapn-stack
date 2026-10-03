@@ -57,6 +57,57 @@ validate_domain "no-dot-here" 2>/dev/null && bad "invalid domain passes" || ok "
 validate_app_port "3005" && ok "valid app port" || bad "app port fails"
 validate_app_port "80" 2>/dev/null && bad "port 80 passes" || ok "service port rejected"
 [[ "$(slugify_domain 'Checkin.Example.VN')" == "checkin-example-vn" ]] && ok "slugify" || bad "slugify wrong"
+validate_node_version "24"     && ok "node version 24"      || bad "node 24 rejected"
+validate_node_version "24.9.0" && ok "node version 24.9.0"  || bad "node 24.9.0 rejected"
+validate_node_version "lts/jod" && ok "node alias lts/jod"  || bad "lts/jod rejected"
+validate_node_version "2 4" 2>/dev/null && bad "typo '2 4' accepted" || ok "node typo rejected"
+
+# --- 3b) adapter_node_bin resolves the real fnm layout ---
+# Regression: the old find used -maxdepth 3, one level too shallow for
+# node-versions/vX.Y.Z/installation/bin/node, so ExecStart fell back to a
+# /usr/bin/node that install.sh never puts there -> every unit died 203/EXEC.
+sect "adapter_node_bin (fnm layout)"
+fake_home="$(mktemp -d)"
+fnm_dir="$fake_home/.local/share/fnm"
+mkdir -p "$fnm_dir/node-versions/v24.9.0/installation/bin" "$fnm_dir/aliases/default/bin"
+: >"$fnm_dir/node-versions/v24.9.0/installation/bin/node"
+: >"$fnm_dir/aliases/default/bin/node"   # a plain dir here: ln -s is unreliable on Windows
+# Stub getent so the adapter resolves our fake home without touching real users.
+getent() { printf 'x:x:0:0::%s:/usr/sbin/nologin\n' "$fake_home"; }
+# shellcheck source=/dev/null
+source "$LAPN_HOME/adapters/_interface.sh"
+got="$(adapter_node_bin fakeuser 24)"
+[[ "$got" == "$fnm_dir/node-versions/v24.9.0/installation/bin/node" ]] \
+  && ok "resolves pinned major (24 -> v24.9.0)" || bad "pinned major returned: $got"
+got="$(adapter_node_bin fakeuser 24.9.0)"
+[[ "$got" == "$fnm_dir/node-versions/v24.9.0/installation/bin/node" ]] \
+  && ok "resolves exact version (24.9.0)" || bad "exact version returned: $got"
+got="$(adapter_node_bin fakeuser 18)"   # not installed -> fnm default alias
+[[ "$got" == "$fnm_dir/aliases/default/bin/node" ]] \
+  && ok "falls back to the fnm default alias" || bad "fallback returned: $got"
+unset -f getent
+rm -rf "$fake_home"
+
+# --- 3c) core_config_set writes overrides into /etc/lapn/config ---
+sect "core_config_set"
+cfg_dir="$(mktemp -d)"
+(
+  LAPN_HOME="$LAPN_HOME"; export LAPN_HOME
+  # shellcheck source=/dev/null
+  source "$LAPN_HOME/lib/core.sh"
+  export LAPN_CONFIG="$cfg_dir/config"
+  printf '# LapN config (override defaults)\nLAPN_SSH_PORT=22\n' >"$LAPN_CONFIG"
+  core_config_set LAPN_NODE_DEFAULT 24
+  core_config_set LAPN_SSH_PORT 2222
+  core_config_set LAPN_NODE_DEFAULT 26          # replace, must not duplicate
+  [[ "$(grep -c '^LAPN_NODE_DEFAULT=' "$LAPN_CONFIG")" == "1" ]] || exit 1
+  [[ "$LAPN_NODE_DEFAULT" == "26" ]] || exit 2  # applied in-process too
+  ( . "$LAPN_CONFIG" && [[ "$LAPN_SSH_PORT" == "2222" ]] ) || exit 3
+  core_config_set NOT_A_LAPN_KEY 1 2>/dev/null && exit 4
+  exit 0
+) && ok "core_config_set: replace, in-process, sourceable, key guard" \
+  || bad "core_config_set failed (exit $?)"
+rm -rf "$cfg_dir"
 
 # --- 4) End-to-end flow (only when root + systemd) ---
 if (( EUID == 0 )) && pidof systemd >/dev/null 2>&1; then
