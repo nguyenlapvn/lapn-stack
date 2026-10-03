@@ -8,4 +8,7 @@
 bin/lapn    text eol=lf
 install.sh  text eol=lf
 VERSION     text eol=lf
+# systemd refuses to parse a unit whose lines end in CRLF.
+*.service   text eol=lf
+*.timer     text eol=lf
 *.json      text eol=lf
