@@ -523,6 +523,8 @@ EOF
   _db_remote_info "$user"
 }
 
+# Client-agnostic on purpose: Navicat only covers MongoDB in a separate product, so
+# the engines are listed with the tool people actually use for each.
 _db_remote_info() {
   local user="$1"
   local ip ssh_port
@@ -530,23 +532,49 @@ _db_remote_info() {
   ssh_port="${LAPN_SSH_PORT:-${LAPN_SSH_PORT_DEFAULT:-22}}"
   cat <<EOF
 
-${C_BOLD}Navicat configuration (SSH tunnel)${C_RESET}
-  SSH tab:
+${C_BOLD}Remote DB access over SSH tunnel${C_RESET}
+  SSH settings (same for every client):
     Host        : ${ip}
     Port        : ${ssh_port}
     User name   : ${user}
-    Auth method : Private Key (matching the public key that was added)
-  General tab (connect to DB over the tunnel — localhost IS the server):
-    Host        : 127.0.0.1
-    Port        : 3306 (MariaDB) | 5432 (Postgres) | 27017 (Mongo) | 6379 (Redis)
-    User / Pass : the per-site DB user
+    Auth method : Private Key — the key whose public half you added
+
+  Then point the client at 127.0.0.1. Inside the tunnel, localhost IS the server.
+EOF
+  local any=""
+  _db_remote_engine_line mariadb  3306  "Navicat / DBeaver / TablePlus"      && any=1
+  _db_remote_engine_line postgres 5432  "Navicat / DBeaver / pgAdmin"        && any=1
+  _db_remote_engine_line mongo    27017 "MongoDB Compass (has its own SSH tunnel) / mongosh" && any=1
+  _db_remote_engine_line redis    6379  "RedisInsight / redis-cli"           && any=1
+  [[ -z "$any" ]] && printf '    (no engine installed yet — Stack › Install software)\n'
+
+  if state_service_installed mongo 2>/dev/null; then
+    cat <<EOF
+
+${C_BOLD}MongoDB — the one that trips people up${C_RESET}
+  LapN creates each site's Mongo user INSIDE that site's database, not in admin.
+  A connection string carries that automatically:
+      mongodb://<user>:<pass>@127.0.0.1:27017/<dbname>
+  but Compass's form fields default "Authentication Database" to admin, which fails.
+  Either paste the URI from the site's .env, or set authSource to <dbname>.
+EOF
+  fi
+  cat <<EOF
 
 Credentials for a site:   lapn site:env --domain <domain> --show
 Databases LapN manages:   lapn db:list
+Plain tunnel, no GUI:     ssh -N -L 3307:127.0.0.1:3306 ${user}@${ip} -p ${ssh_port}
 
-Note: the DB port is NOT exposed to the Internet; it only travels inside the SSH
-tunnel, and this user can forward to nothing else (PermitOpen) and gets no shell.
+Note: no DB port is exposed to the Internet. This user gets no shell and can only
+forward to the four DB ports on 127.0.0.1 (PermitOpen).
 EOF
+}
+
+# Print one engine row; returns non-zero when that engine is not installed.
+_db_remote_engine_line() {
+  local engine="$1" port="$2" clients="$3"
+  state_service_installed "$engine" 2>/dev/null || return 1
+  printf '    %-9s 127.0.0.1:%-6s %s\n' "$engine" "$port" "$clients"
 }
 
 # ============ LIST ============
