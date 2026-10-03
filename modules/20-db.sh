@@ -163,7 +163,10 @@ _db_install_mongo() {
   local rootpass; rootpass="$(_db_gen_pass)"
   printf '%s' "$rootpass" >"$(_db_root_secret mongo)"; chmod 600 "$(_db_root_secret mongo)"
   systemctl restart mongod; sleep 3
-  mongosh --quiet --eval "db.getSiblingDB('admin').createUser({user:'lapnadmin',pwd:'${rootpass}',roles:['root']})" 2>/dev/null \
+  # Over stdin, so the brand-new root password never appears in the process table.
+  printf 'db.getSiblingDB("admin").createUser({user:"lapnadmin",pwd:%s,roles:["root"]});\n' \
+    "$(jq -Rn --arg s "$rootpass" '$s')" \
+    | mongosh --quiet "mongodb://127.0.0.1:27017/admin" >/dev/null 2>&1 \
     || log_warn "Mongo admin may already exist."
 }
 
@@ -239,10 +242,14 @@ cmd_db_create() {
   dbname="$(resolve_input "dbname" "$DB_NAME" --prompt "Database name" --default "$def_name" --validate validate_db_ident)"
   dbuser="$(resolve_input "dbuser" "$DB_USER" --prompt "Database user" --default "$def_user" --validate validate_db_ident)"
   if [[ -n "$DB_PASS" ]]; then
+    validate_db_password "$DB_PASS" || die "--dbpass rejected."
     dbpass="$DB_PASS"
   elif [[ -z "$domain" && "${LAPN_INTERACTIVE:-0}" == "1" ]]; then
-    dbpass="$(ui_password "Password (leave blank to auto-generate)")"
-    [[ -z "$dbpass" ]] && dbpass="$(_db_gen_pass)"
+    while true; do
+      dbpass="$(ui_password "Password (leave blank to auto-generate)")"
+      [[ -z "$dbpass" ]] && { dbpass="$(_db_gen_pass)"; break; }
+      validate_db_password "$dbpass" && break
+    done
   else
     dbpass="$(_db_gen_pass)"   # auto when attaching to a site or non-interactive
   fi
@@ -333,11 +340,14 @@ SQL
 
 _db_create_mongo() {
   local dbname="$1" dbuser="$2" dbpass="$3"
-  local admin; admin="$(cat "$(_db_root_secret mongo)" 2>/dev/null || true)"
+  # Values go through jq -Rn so a password can never terminate the JS literal, and the
+  # whole script travels on stdin so no credential lands in the process table.
   # createUser prints its result document — keep it out of the URL.
-  mongosh --quiet -u lapnadmin -p "$admin" --authenticationDatabase admin --eval \
-    "db.getSiblingDB('${dbname}').createUser({user:'${dbuser}',pwd:'${dbpass}',roles:[{role:'readWrite',db:'${dbname}'}]})" \
-    >/dev/null 2>&1 || log_warn "Mongo user may already exist."
+  _db_mongosh_admin "db.getSiblingDB($(_db_js_str "$dbname")).createUser({
+      user: $(_db_js_str "$dbuser"),
+      pwd:  $(_db_js_str "$dbpass"),
+      roles: [{ role: 'readWrite', db: $(_db_js_str "$dbname") }]
+    });" >/dev/null 2>&1 || log_warn "Mongo user may already exist."
   printf 'mongodb://%s:%s@127.0.0.1:27017/%s' "$dbuser" "$dbpass" "$dbname"
 }
 
@@ -370,7 +380,7 @@ cmd_db_drop() {
   fi
 
   # Quick dump before deletion.
-  mkdir -p "$LAPN_TRASH"
+  mkdir -p "$LAPN_TRASH"; chmod 700 "$LAPN_TRASH"   # may hold .env and SQL dumps
   local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
   case "$engine" in
     mariadb)
@@ -387,9 +397,8 @@ SQL
       [[ -n "$dbuser" ]] && sudo -u postgres psql -c "DROP ROLE IF EXISTS ${dbuser};" || true
       ;;
     mongo)
-      local admin; admin="$(cat "$(_db_root_secret mongo)" 2>/dev/null || true)"
-      mongosh --quiet -u lapnadmin -p "$admin" --authenticationDatabase admin --eval \
-        "db.getSiblingDB('${dbname}').dropDatabase()" 2>/dev/null || true
+      _db_mongosh_admin "db.getSiblingDB($(_db_js_str "$dbname")).dropDatabase();" \
+        >/dev/null 2>&1 || true
       ;;
   esac
 
@@ -411,11 +420,14 @@ cmd_db_console() {
   log_info "Connecting: $url"
   case "$url" in
     mysql://*)
-      # One argument per array element: quoting the whole string would hand mysql a
-      # single argv entry ("--user=... --password=... db") and it would fail.
-      local -a margs=(); local a
-      while IFS= read -r a; do margs+=("$a"); done < <(_db_url_to_mysql_args "$url")
-      mysql "${margs[@]}" ;;
+      # --password=... on argv is readable by every local user via /proc/*/cmdline.
+      # A 0600 defaults file keeps it out of the process table.
+      local cnf db
+      cnf="$(mktemp)"; chmod 600 "$cnf"
+      trap 'rm -f "$cnf"' EXIT INT TERM
+      db="$(_db_write_mysql_cnf "$url" "$cnf")"
+      mysql --defaults-extra-file="$cnf" "$db"
+      rm -f "$cnf"; trap - EXIT INT TERM ;;
     postgresql://*) psql "$url" ;;
     mongodb://*)    mongosh "$url" ;;
     redis://*)      redis-cli -u "$url" ;;
@@ -423,17 +435,33 @@ cmd_db_console() {
   esac
 }
 
-# mysql://user:pass@host:port/db -> one mysql argument per line.
-_db_url_to_mysql_args() {
-  local u="$1"
+# _db_write_mysql_cnf <mysql://user:pass@host:port/db> <file>
+# Writes a [client] section into <file> and prints the database name.
+_db_write_mysql_cnf() {
+  local u="$1" out="$2"
   local rest="${u#mysql://}"
   local creds="${rest%%@*}" hostpart="${rest#*@}"
   local user="${creds%%:*}" pass="${creds#*:}"
   local hostport="${hostpart%%/*}" db="${hostpart#*/}"
   local host="${hostport%%:*}" port="${hostport#*:}"
   [[ "$port" == "$hostport" ]] && port=3306
-  printf '%s\n' "--user=$user" "--password=$pass" "--host=$host" "--port=$port" "$db"
+  printf '[client]\nuser=%s\npassword=%s\nhost=%s\nport=%s\n' \
+    "$user" "$pass" "$host" "$port" >"$out"
+  printf '%s' "$db"
 }
+
+# _db_mongosh_admin <javascript> — run JS as the admin user WITHOUT putting the password
+# on the command line: both the credentials and the script arrive over stdin.
+_db_mongosh_admin() {
+  local js="$1" admin
+  admin="$(cat "$(_db_root_secret mongo)" 2>/dev/null || true)"
+  printf 'db = db.getSiblingDB("admin"); db.auth(%s, %s);\n%s\n' \
+    "$(_db_js_str lapnadmin)" "$(_db_js_str "$admin")" "$js" \
+    | mongosh --quiet "mongodb://127.0.0.1:27017/admin"
+}
+
+# JSON-quote a value for safe embedding in a mongosh script.
+_db_js_str() { jq -Rn --arg s "$1" '$s'; }
 
 # ============ REMOTE (Navicat over SSH tunnel) ============
 cmd_db_remote() {
@@ -556,9 +584,16 @@ cmd_db_backup() {
       sudo -u postgres pg_dump "$dbname" >"$out" || die "pg_dump failed." ;;
     mongo)
       out="$dir/${dbname}-${stamp}.archive.gz"
-      local admin; admin="$(cat "$(_db_root_secret mongo)" 2>/dev/null || true)"
-      mongodump -u lapnadmin -p "$admin" --authenticationDatabase admin \
-        --db "$dbname" --archive="$out" --gzip || die "mongodump failed." ;;
+      # mongodump has no stdin auth, but it reads a YAML config — 0600, removed right
+      # after — which keeps the password out of /proc/*/cmdline.
+      local admin cfg
+      admin="$(cat "$(_db_root_secret mongo)" 2>/dev/null || true)"
+      cfg="$(mktemp)"; chmod 600 "$cfg"
+      trap 'rm -f "$cfg"' EXIT INT TERM
+      printf 'password: %s\n' "$admin" >"$cfg"
+      mongodump --config="$cfg" -u lapnadmin --authenticationDatabase admin \
+        --db "$dbname" --archive="$out" --gzip || { rm -f "$cfg"; die "mongodump failed."; }
+      rm -f "$cfg"; trap - EXIT INT TERM ;;
   esac
   chmod 600 "$out" 2>/dev/null || true
   audit "OK" "db:backup $engine $dbname"

@@ -37,6 +37,37 @@ cmd_doctor() {
 
 _dr_section() { printf '\n%s%s%s\n' "$C_BOLD" "$1" "$C_RESET"; }
 
+# doctor_dashboard — compact overview for the top of the main menu. Cheap on purpose
+# (no cert parsing, no network): the full audit stays in `lapn doctor`.
+doctor_dashboard() {
+  state_init 2>/dev/null || return 0
+  local total=0 down=0 domain name type
+  while IFS= read -r domain; do
+    [[ -z "$domain" ]] && continue
+    total=$((total + 1))
+    type="$(state_site_get "$domain" type)"
+    name="$(state_site_get "$domain" name)"
+    [[ "$type" == "static" ]] && continue
+    [[ -f "/etc/systemd/system/lapn-${name}.service" ]] || continue
+    systemctl is-active --quiet "lapn-${name}.service" || down=$((down + 1))
+  done < <(state_sites_list 2>/dev/null)
+
+  local disk ram_used ram_tot fw
+  disk="$(df -P / 2>/dev/null | awk 'NR==2{print $5}')"
+  ram_used="$(free -m 2>/dev/null | awk '/^Mem:/{printf "%.1f", $3/1024}')"
+  ram_tot="$(free -m 2>/dev/null | awk '/^Mem:/{printf "%.1f", $2/1024}')"
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
+    fw="${C_GREEN}UFW active${C_RESET}"
+  else
+    fw="${C_YELLOW}UFW off${C_RESET}"
+  fi
+
+  local sites="${total} site(s)"
+  (( down > 0 )) && sites="${sites}, ${C_RED}${down} down${C_RESET}"
+  printf '  %s%s%s  ·  Disk %s  ·  RAM %sG/%sG  ·  %s\n' \
+    "$C_DIM" "$sites" "$C_RESET" "${disk:-?}" "${ram_used:-?}" "${ram_tot:-?}" "$fw"
+}
+
 _dr_check_disk_ram() {
   local diskpct rammb
   diskpct="$(df -P / | awk 'NR==2{gsub("%","",$5); print $5}')"

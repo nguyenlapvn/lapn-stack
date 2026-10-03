@@ -27,6 +27,8 @@ die() {
 
 # audit <result> <message> — write a line to actions.log (if writable).
 # Format: ISO8601 | invoker | uid | result | message
+# The log records what root did on this box, so it is created root-only (0600 in a 0750
+# directory) rather than left to the ambient umask, which made it world-readable.
 audit() {
   local result="$1"; shift
   local msg="$*"
@@ -35,11 +37,33 @@ audit() {
   local invoker="${SUDO_USER:-${USER:-unknown}}"
   local ts; ts="$(date -Iseconds 2>/dev/null || date)"
   # Do not let a logging error kill the main command.
-  { [[ -d "$logdir" ]] || mkdir -p "$logdir" 2>/dev/null; } || return 0
+  { [[ -d "$logdir" ]] || mkdir -p -m 750 "$logdir" 2>/dev/null; } || return 0
+  if [[ ! -e "$logfile" ]]; then
+    ( umask 077; : >"$logfile" ) 2>/dev/null || true
+  fi
   printf '%s | %s | uid=%s | %s | %s\n' \
     "$ts" "$invoker" "$(id -u 2>/dev/null || echo '?')" "$result" "$msg" \
     >>"$logfile" 2>/dev/null || true
 }
 
-# audit_cmd "command being run" — convenience to log the start of an action.
-audit_cmd() { audit "RUN" "$*"; }
+# Flags whose VALUE must never reach the log. The audit line records the whole command
+# line, so without this a DB password, a Cloudflare API token or an SSH key would sit in
+# plaintext in actions.log.
+_AUDIT_SECRET_FLAGS='--dbpass|--cf-token|--key|--password|--pass|--token|--secret'
+
+# audit_redact <args...> -> the command line with every secret value replaced by ***.
+audit_redact() {
+  local out="" prev="" a
+  for a in "$@"; do
+    if [[ "$prev" =~ ^($_AUDIT_SECRET_FLAGS)$ ]]; then
+      out+=" ***"
+    else
+      out+=" $a"
+    fi
+    prev="$a"
+  done
+  printf '%s' "${out# }"
+}
+
+# audit_cmd <command> [args...] — log the start of an action, secrets masked.
+audit_cmd() { audit "RUN" "$(audit_redact "$@")"; }

@@ -77,7 +77,8 @@ ok "lapn -> /usr/local/bin/lapn"
 
 # --- 5) /etc/lapn + state + config ---
 say "Initializing /etc/lapn"
-mkdir -p /etc/lapn/secrets /var/log/lapn
+mkdir -p /etc/lapn/secrets
+mkdir -p -m 750 /var/log/lapn
 chmod 700 /etc/lapn/secrets
 if [[ ! -f /etc/lapn/sites.json ]]; then
   jq -n --argjson v "${LAPN_SCHEMA_VERSION:-2}" \

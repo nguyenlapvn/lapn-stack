@@ -8,7 +8,7 @@
     delaycompress
     missingok
     notifempty
-    create 0640 root adm
+    create 0600 root root
 }
 
 # App-written log files (if the app writes directly to a file). stdout/stderr already go to journald.

@@ -105,8 +105,11 @@ _ssl_issue_http01() {
   if [[ "$behind_cf" == "true" ]]; then
     log_warn "Site is behind Cloudflare proxy — HTTP-01 is fragile. Consider --method dns-cloudflare."
   fi
+  # Aliases must be in the certificate too, or https://www.<domain> breaks.
+  local -a names=(); local n
+  while IFS= read -r n; do names+=("$n"); done < <(_ssl_cert_names "$domain")
   # shellcheck disable=SC2046
-  certbot --nginx -d "$domain" --redirect --agree-tos --non-interactive \
+  certbot --nginx "${names[@]}" --redirect --agree-tos --non-interactive \
     $(_ssl_email_flag "$email") ${SSL_DRYRUN:+--dry-run} \
     || die "certbot HTTP-01 failed."
 }
@@ -124,7 +127,8 @@ _ssl_issue_dns_cf() {
   chmod 600 "$tokfile"
   # Opt-in only. Asking for *.$domain unprompted puts names in the certificate that
   # nobody requested, and on a token scoped to one record it fails the whole order.
-  local -a names=(-d "$domain")
+  local -a names=(); local n
+  while IFS= read -r n; do names+=("$n"); done < <(_ssl_cert_names "$domain")
   [[ -n "$SSL_WILDCARD" ]] && { names+=(-d "*.$domain"); log_info "Also requesting the wildcard *.$domain"; }
   # shellcheck disable=SC2046
   certbot certonly --dns-cloudflare --dns-cloudflare-credentials "$tokfile" \
@@ -166,14 +170,24 @@ _ssl_wire_cert_into_nginx() {
   local domain="$1" certdir="$2" cert="${3:-fullchain.pem}" key="${4:-privkey.pem}"
   local name; name="$(state_site_get "$domain" name)"
   local conf="/etc/nginx/sites-available/lapn-${name}.conf"
+  local names; names="$(site_server_names "$domain")"
   site_render_nginx "$domain" || die "Rendering the nginx config for $domain failed."
   # Left over from LapN < 0.3, when the locations were copied instead of shared.
   rm -f "/etc/nginx/snippets/lapn-https-locations-${name}.conf"
-  sed -e "s#{{DOMAIN}}#${domain}#g" \
+  sed -e "s#{{SERVER_NAMES}}#${names}#g" \
+      -e "s#{{DOMAIN}}#${domain}#g" \
       -e "s#{{NAME}}#${name}#g" \
       -e "s#{{CERT}}#${certdir}/${cert}#g" \
       -e "s#{{KEY}}#${certdir}/${key}#g" \
       "$LAPN_HOME/templates/nginx/https.conf.tpl" >>"$conf"
+}
+
+# Every name the certificate must cover, as repeated `-d name` arguments.
+_ssl_cert_names() {
+  local domain="$1" n
+  for n in $(site_server_names "$domain"); do
+    printf -- '-d\n%s\n' "$n"
+  done
 }
 
 _ssl_enable_hsts() {

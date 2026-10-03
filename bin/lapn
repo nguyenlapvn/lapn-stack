@@ -94,7 +94,11 @@ lapn_menu() {
   while true; do
     lapn_clear
     printf '%s%sLapN%s — Lightweight App Platform for Node.js\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
-    printf '%sChoose a feature group:%s\n\n' "$C_DIM" "$C_RESET"
+    # One-line overview, provided by the diagnostics module (no business logic here).
+    if declare -F doctor_dashboard >/dev/null; then
+      doctor_dashboard || true
+    fi
+    printf '\n'
 
     menu_names=(); i=1
     for name in "${modules[@]}"; do

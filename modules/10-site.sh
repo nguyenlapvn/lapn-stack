@@ -3,8 +3,12 @@
 
 MODULE_NAME="Site management"
 MODULE_ORDER=10
-MODULE_COMMANDS=("site:create" "site:list" "site:info" "site:node" "site:delete" \
+MODULE_COMMANDS=("site:create" "site:list" "site:info" "site:env" "site:alias" \
+                 "site:node" "site:start" "site:stop" "site:delete" \
                  "deploy:git" "deploy:rebuild" "deploy:restart" "deploy:logs")
+# Site-first menu: pick a site, then act on it — instead of a list of command names
+# that each ask you to retype the domain.
+MODULE_MENU="site_menu"
 
 # --- Rollback stack: push undo commands, run them in reverse on failure ---
 declare -a _SITE_UNDO=()
@@ -70,7 +74,8 @@ cmd_site_create() {
     if [[ "${LAPN_INTERACTIVE:-0}" == "1" ]]; then
       # Ask, defaulting to auto. Press Enter to accept auto, or type a custom port.
       while true; do
-        local input; input="$(ui_ask "Internal app port (Enter = auto $auto)" "$auto")"
+        # ui_ask already renders the default as "[3001]" — do not repeat it in the text.
+        local input; input="$(ui_ask "Internal app port" "$auto")"
         if [[ "$input" == "$auto" ]]; then port="$auto"; break; fi
         if net_check_user_port "$input"; then port="$input"; break; fi
         # invalid -> ask again
@@ -152,7 +157,7 @@ cmd_site_create() {
         || log_warn "Health check did not pass — the app may need more configuration. Check journalctl -u lapn-${name}"
     else
       log_warn "No app code in $appdir yet — the systemd unit will be created by your first deploy:"
-      log_warn "  lapn deploy:git --domain $domain --git <url>"
+      log_dim  "  lapn deploy:git --domain $domain --git <url>"
     fi
   fi
 
@@ -203,13 +208,41 @@ load_adapter_interface() {
   source "$LAPN_HOME/adapters/_interface.sh"
 }
 
+# Pre-flight the domain's DNS and say which SSL method will actually work.
+# Compares against EVERY resolved address: `getent hosts | head -n1` returns the AAAA
+# first on a dual-stack record, so a v6 answer was being compared with the server's v4
+# address and every proxied domain looked like a DNS mistake.
 _site_warn_dns() {
-  local domain="$1" server_ip resolved
-  server_ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
-  resolved="$(getent hosts "$domain" 2>/dev/null | awk '{print $1}' | head -n1 || true)"
-  if [[ -n "$server_ip" && -n "$resolved" && "$server_ip" != "$resolved" ]]; then
-    log_warn "DNS for $domain ($resolved) does not point to the server IP ($server_ip) yet. SSL HTTP-01 will fail until it points correctly."
+  local domain="$1" a ip
+  local -a resolved=()
+  while IFS= read -r a; do
+    [[ -n "$a" ]] && resolved+=("$a")
+  done < <(getent ahosts "$domain" 2>/dev/null | awk '{print $1}' | sort -u)
+
+  if (( ${#resolved[@]} == 0 )); then
+    log_warn "$domain does not resolve yet — add an A record pointing at this server before issuing SSL."
+    return 0
   fi
+
+  local v4 v6
+  v4="$(curl -fsS --max-time 5 https://api.ipify.org  2>/dev/null || true)"
+  v6="$(curl -fsS --max-time 5 https://api6.ipify.org 2>/dev/null || true)"
+  for ip in "${resolved[@]}"; do
+    [[ -n "$v4" && "$ip" == "$v4" ]] && return 0
+    [[ -n "$v6" && "$ip" == "$v6" ]] && return 0
+  done
+
+  # Pointing at Cloudflare is a correct setup, not a mistake — but HTTP-01 cannot work
+  # through the proxy, so name the method that can.
+  if net_is_cloudflare_ip "${resolved[@]}"; then
+    log_info "$domain resolves to Cloudflare (${resolved[0]}) — the proxy (orange cloud) is on."
+    log_info "Issue SSL with:  lapn ssl:issue --domain $domain --method dns-cloudflare --cf-token <TOKEN>"
+    log_dim  "HTTP-01 (certbot-nginx) cannot validate through the proxy."
+    return 0
+  fi
+
+  log_warn "DNS for $domain (${resolved[*]}) does not point at this server (${v4:-unknown})."
+  log_warn "SSL HTTP-01 will fail until it does."
 }
 
 # A site has something to run once a package.json or a plain index.html is in place.
@@ -282,25 +315,47 @@ _site_allow_nginx_read() {
 _site_write_nginx_body() {
   local domain="$1" name="$2" type="$3" port="$4" appdir="$5" user="$6" cf_on="${7:-}"
   local body="/etc/nginx/snippets/lapn-site-${name}.conf"
+  local logdir="${LAPN_SITES_HOME}/${name}/logs"
   local cf_include=""
   [[ "$cf_on" == "1" ]] && cf_include="include /etc/nginx/snippets/lapn-cloudflare-realip.conf;"
-  mkdir -p /etc/nginx/snippets
+  mkdir -p /etc/nginx/snippets "$logdir"
+
+  # Canonical redirect, when the site asked for it. In the shared body on purpose: one
+  # rule then covers :80 and :443, and under TLS it just works because the certificate
+  # already has to cover every alias in server_name.
+  local canonical=""
+  if [[ "$(state_site_get "$domain" canonical 2>/dev/null)" == "true" ]]; then
+    canonical="if (\$host != \"${domain}\") { return 301 \$scheme://${domain}\$request_uri; }"
+  fi
 
   if [[ "$type" == "static" ]]; then
     local root; root="$(adapter_static_root)"
     _site_allow_nginx_read "$user"
     sed -e "s#{{DOMAIN}}#${domain}#g" \
         -e "s#{{ROOT}}#${root}#g" \
+        -e "s#{{LOGDIR}}#${logdir}#g" \
+        -e "s#{{CANONICAL_REDIRECT}}#${canonical}#g" \
         -e "s#{{CLIENT_MAX_BODY}}#${LAPN_CLIENT_MAX_BODY:-10m}#g" \
         -e "s#{{CF_REALIP_INCLUDE}}#${cf_include}#g" \
         "$LAPN_HOME/templates/nginx/body-static.conf.tpl" >"$body"
   else
     sed -e "s#{{DOMAIN}}#${domain}#g" \
         -e "s#{{PORT}}#${port}#g" \
+        -e "s#{{LOGDIR}}#${logdir}#g" \
+        -e "s#{{CANONICAL_REDIRECT}}#${canonical}#g" \
         -e "s#{{CLIENT_MAX_BODY}}#${LAPN_CLIENT_MAX_BODY:-10m}#g" \
         -e "s#{{CF_REALIP_INCLUDE}}#${cf_include}#g" \
         "$LAPN_HOME/templates/nginx/body-proxy.conf.tpl" >"$body"
   fi
+}
+
+# Every name this site answers on: the domain plus its aliases, space separated.
+site_server_names() {
+  local domain="$1" a out="$domain"
+  while IFS= read -r a; do
+    [[ -n "$a" ]] && out+=" $a"
+  done < <(state_jq -r --arg d "$domain" '(.sites[$d].aliases // [])[]' 2>/dev/null || true)
+  printf '%s' "$out"
 }
 
 # _site_write_nginx <domain> <name> <type> <port> <appdir> <user> <cf_on>
@@ -312,15 +367,18 @@ _site_write_nginx() {
   local avail="/etc/nginx/sites-available/lapn-${name}.conf"
   local enabled="/etc/nginx/sites-enabled/lapn-${name}.conf"
   _site_write_nginx_body "$@"
+  local names; names="$(site_server_names "$domain")"
 
   if [[ "$type" == "static" ]]; then
     local root; root="$(adapter_static_root)"
-    sed -e "s#{{DOMAIN}}#${domain}#g" \
+    sed -e "s#{{SERVER_NAMES}}#${names}#g" \
+        -e "s#{{DOMAIN}}#${domain}#g" \
         -e "s#{{NAME}}#${name}#g" \
         -e "s#{{ROOT}}#${root}#g" \
         "$LAPN_HOME/templates/nginx/static.conf.tpl" >"$avail"
   else
-    sed -e "s#{{DOMAIN}}#${domain}#g" \
+    sed -e "s#{{SERVER_NAMES}}#${names}#g" \
+        -e "s#{{DOMAIN}}#${domain}#g" \
         -e "s#{{NAME}}#${name}#g" \
         -e "s#{{PORT}}#${port}#g" \
         "$LAPN_HOME/templates/nginx/proxy.conf.tpl" >"$avail"
@@ -496,6 +554,210 @@ cmd_site_node() {
   log_ok "$domain now runs Node v$ver."
 }
 
+# =====================================================================
+# Environment variables — the .env is root-owned 0600 and systemd injects it, so
+# editing it by hand means knowing the path, sudo, and remembering to restart.
+# =====================================================================
+
+# site:env --domain <d> [--show] [--set K=V]... [--unset K]... [--edit]
+cmd_site_env() {
+  core_require_root
+  state_init
+  local domain="" show="" edit=""
+  local -a sets=() unsets=()
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --domain) domain="$2"; shift 2 ;;
+      --show)   show=1; shift ;;
+      --edit)   edit=1; shift ;;
+      --set)    sets+=("$2"); shift 2 ;;
+      --unset)  unsets+=("$2"); shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  domain="$(resolve_input "domain" "$domain" --prompt "Domain" --validate validate_domain)"
+  state_site_exists "$domain" || die "No site '$domain'."
+  local name envfile
+  name="$(state_site_get "$domain" name)"
+  envfile="${LAPN_SECRETS}/${name}/.env"
+  [[ -f "$envfile" ]] || die "No .env for $domain at $envfile."
+
+  if [[ -n "$edit" ]]; then
+    "${EDITOR:-nano}" "$envfile"
+    chmod 600 "$envfile"
+    _site_env_restart "$domain" "$name"
+    return 0
+  fi
+
+  if (( ${#sets[@]} == 0 && ${#unsets[@]} == 0 )); then
+    _site_env_list "$envfile" "$show"
+    return 0
+  fi
+
+  local kv key val
+  for kv in "${sets[@]:-}"; do
+    [[ -z "$kv" ]] && continue
+    [[ "$kv" == *=* ]] || die "--set expects KEY=VALUE, got '$kv'."
+    key="${kv%%=*}"; val="${kv#*=}"
+    _site_env_valid_key "$key" || die "Invalid variable name '$key'."
+    [[ "$val" == *$'\n'* ]] && die "A value cannot contain a newline."
+    # systemd's EnvironmentFile needs quoting once a value has spaces or #.
+    [[ "$val" =~ [[:space:]#] ]] && val="\"${val//\"/\\\"}\""
+    _site_env_unset_key "$envfile" "$key"
+    printf '%s=%s\n' "$key" "$val" >>"$envfile"
+    log_ok "set $key"
+  done
+  for key in "${unsets[@]:-}"; do
+    [[ -z "$key" ]] && continue
+    _site_env_valid_key "$key" || die "Invalid variable name '$key'."
+    _site_env_unset_key "$envfile" "$key"
+    log_ok "unset $key"
+  done
+  chmod 600 "$envfile"
+  audit "OK" "site:env $domain"
+  _site_env_restart "$domain" "$name"
+}
+
+_site_env_valid_key() { [[ "$1" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]]; }
+
+_site_env_unset_key() {
+  local file="$1" key="$2" tmp
+  tmp="$(mktemp)"; chmod 600 "$tmp"
+  grep -vE "^[[:space:]]*${key}=" "$file" >"$tmp" 2>/dev/null || true
+  cat "$tmp" >"$file"; rm -f "$tmp"
+}
+
+# Values are masked by default: this is usually read over a shared screen.
+_site_env_list() {
+  local file="$1" show="$2" line key val
+  printf '%s%-28s %s%s\n' "$C_BOLD" "VARIABLE" "VALUE" "$C_RESET"
+  while IFS= read -r line; do
+    [[ "$line" =~ ^[[:space:]]*# || -z "${line//[[:space:]]/}" ]] && continue
+    [[ "$line" != *=* ]] && continue
+    key="${line%%=*}"; val="${line#*=}"
+    if [[ -z "$show" && ${#val} -gt 4 ]]; then
+      val="${val:0:2}****${val: -2}"
+    elif [[ -z "$show" ]]; then
+      val="****"
+    fi
+    printf '%-28s %s\n' "$key" "$val"
+  done <"$file"
+  [[ -z "$show" ]] && log_dim "Values are masked — add --show to reveal them."
+  return 0
+}
+
+_site_env_restart() {
+  local domain="$1" name="$2"
+  if [[ -f "/etc/systemd/system/lapn-${name}.service" ]]; then
+    systemctl restart "lapn-${name}.service" \
+      && log_ok "Restarted lapn-${name} so the app picks the change up." \
+      || log_warn "Restart failed — see: journalctl -u lapn-${name} -n 50"
+  else
+    log_info "No unit yet — the change applies at the first deploy."
+  fi
+}
+
+# =====================================================================
+# Domain aliases (www. and friends)
+# =====================================================================
+
+# site:alias --domain <d> [--add <name>] [--del <name>] [--canonical|--no-canonical]
+cmd_site_alias() {
+  core_require_root
+  state_init
+  local domain="" add="" del="" canonical=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --domain)        domain="$2"; shift 2 ;;
+      --add)           add="$2"; shift 2 ;;
+      --del)           del="$2"; shift 2 ;;
+      --canonical)     canonical=1; shift ;;
+      --no-canonical)  canonical=0; shift ;;
+      *) shift ;;
+    esac
+  done
+  domain="$(resolve_input "domain" "$domain" --prompt "Domain" --validate validate_domain)"
+  state_site_exists "$domain" || die "No site '$domain'."
+
+  if [[ -z "$add" && -z "$del" && -z "$canonical" ]]; then
+    printf '%sAliases for %s%s\n' "$C_BOLD" "$domain" "$C_RESET"
+    local a found=""
+    while IFS= read -r a; do
+      [[ -n "$a" ]] && { printf '  %s\n' "$a"; found=1; }
+    done < <(state_jq -r --arg d "$domain" '(.sites[$d].aliases // [])[]')
+    [[ -z "$found" ]] && printf '  (none)\n'
+    printf 'Canonical redirect: %s\n' \
+      "$([[ "$(state_site_get "$domain" canonical)" == "true" ]] && echo on || echo off)"
+    return 0
+  fi
+
+  if [[ -n "$add" ]]; then
+    validate_domain "$add" || die "Invalid alias '$add'."
+    [[ "$add" == "$domain" ]] && die "'$add' is the site domain, not an alias."
+    state_site_exists "$add" && die "'$add' is already a site of its own."
+    state_update '.sites[$d].aliases = ((.sites[$d].aliases // []) + [$a] | unique)' \
+      --arg d "$domain" --arg a "$add"
+    log_ok "Added alias $add"
+    _site_warn_dns "$add"
+  fi
+  if [[ -n "$del" ]]; then
+    state_update '.sites[$d].aliases = [ (.sites[$d].aliases // [])[] | select(. != $a) ]' \
+      --arg d "$domain" --arg a "$del"
+    log_ok "Removed alias $del"
+  fi
+  if [[ -n "$canonical" ]]; then
+    state_site_set_field "$domain" canonical "$([[ "$canonical" == "1" ]] && echo true || echo false)"
+    log_ok "Canonical redirect $([[ "$canonical" == "1" ]] && echo enabled || echo disabled)."
+  fi
+
+  audit "OK" "site:alias $domain add=${add:-} del=${del:-}"
+  _site_apply_names "$domain"
+}
+
+# Re-render after the set of names changed. With SSL on, the certificate has to cover
+# the new name too, so the issue flow is re-run rather than just reloading nginx.
+_site_apply_names() {
+  local domain="$1"
+  if [[ "$(state_site_get "$domain" ssl)" == "true" ]]; then
+    local method; method="$(state_site_get "$domain" ssl_method)"
+    log_step "Re-issuing SSL so the certificate covers every name"
+    site_render_nginx "$domain" || die "Rendering the nginx config failed."
+    ( core_dispatch "ssl:issue" --domain "$domain" --method "$method" ) || {
+      log_warn "SSL re-issue failed. nginx now serves the new name over HTTP only."
+      log_warn "Fix DNS then run: lapn ssl:issue --domain $domain --method $method"
+      nginx -t && systemctl reload nginx
+      return 0
+    }
+  else
+    site_render_nginx "$domain" || die "Rendering the nginx config failed."
+    nginx -t || die "nginx -t error."
+    systemctl reload nginx
+    log_ok "nginx reloaded."
+  fi
+}
+
+# --- start / stop ---
+cmd_site_start() { _site_power start "$@"; }
+cmd_site_stop()  { _site_power stop  "$@"; }
+
+_site_power() {
+  local action="$1"; shift
+  core_require_root
+  _dep_parse "$@"
+  state_init
+  local domain; domain="$(resolve_input "domain" "$DEP_DOMAIN" --prompt "Domain" --validate validate_domain)"
+  _dep_load_site "$domain"
+  if [[ "$SITE_TYPE" == "static" ]]; then
+    log_info "Static site — served by nginx, there is no unit to $action."
+    return 0
+  fi
+  [[ -f "/etc/systemd/system/lapn-${SITE_NAME}.service" ]] \
+    || die "No unit for $domain yet — deploy it first."
+  systemctl "$action" "lapn-${SITE_NAME}.service" || die "systemctl $action failed."
+  audit "OK" "site:$action $domain"
+  log_ok "$domain: $(systemctl is-active "lapn-${SITE_NAME}.service" 2>/dev/null || echo '?')"
+}
+
 # --- delete ---
 cmd_site_delete() {
   core_require_root
@@ -544,7 +806,7 @@ cmd_site_delete() {
   fi
 
   # quick backup to trash
-  mkdir -p "$LAPN_TRASH"
+  mkdir -p "$LAPN_TRASH"; chmod 700 "$LAPN_TRASH"   # may hold .env and SQL dumps
   local stamp; stamp="$(date +%Y%m%d-%H%M%S)"
   if [[ -d "$home" ]]; then
     tar -czf "${LAPN_TRASH}/${name}-${stamp}.tar.gz" -C "$LAPN_SITES_HOME" "$name" 2>/dev/null || true
@@ -563,6 +825,204 @@ cmd_site_delete() {
   state_site_del "$domain"
   audit "OK" "site:delete $domain"
   log_ok "Site $domain deleted."
+}
+
+# =====================================================================
+# Site-first interactive menu (invoked by bin/lapn via MODULE_MENU).
+# The generic submenu lists command names and makes you retype the domain for every
+# one of them; here you pick the site once and then act on it.
+# =====================================================================
+
+# Status word for the listing: static sites have no unit, undeployed ones have no unit yet.
+_site_status() {
+  local domain="$1" type name
+  type="$(state_site_get "$domain" type)"
+  name="$(state_site_get "$domain" name)"
+  if [[ "$type" == "static" ]]; then printf 'static'; return 0; fi
+  if [[ ! -f "/etc/systemd/system/lapn-${name}.service" ]]; then printf 'no-unit'; return 0; fi
+  systemctl is-active "lapn-${name}.service" 2>/dev/null || printf 'unknown'
+}
+
+site_menu() {
+  state_init
+  local choice i domains=() d
+  while true; do
+    lapn_clear
+    printf '%s%sLapN%s › Sites\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET"
+    domains=()
+    while IFS= read -r d; do [[ -n "$d" ]] && domains+=("$d"); done < <(state_sites_list)
+
+    if (( ${#domains[@]} == 0 )); then
+      printf '  %s(no site yet)%s\n\n' "$C_DIM" "$C_RESET"
+    else
+      printf '  %s%-3s %-30s %-8s %-6s %-4s %s%s\n' \
+        "$C_BOLD" "#" "DOMAIN" "TYPE" "PORT" "SSL" "STATUS" "$C_RESET"
+      for i in "${!domains[@]}"; do
+        d="${domains[$i]}"
+        local st; st="$(_site_status "$d")"
+        local mark="$C_GREEN"; [[ "$st" == "running" || "$st" == "static" ]] || mark="$C_YELLOW"
+        printf '  %-3s %-30s %-8s %-6s %-4s %s%s%s\n' \
+          "$((i + 1))" "$d" \
+          "$(state_site_get "$d" type)" \
+          "$(state_site_get "$d" port)" \
+          "$([[ "$(state_site_get "$d" ssl)" == "true" ]] && echo yes || echo no)" \
+          "$mark" "$st" "$C_RESET"
+      done
+      printf '\n'
+    fi
+    printf '  n) + Create a new site\n'
+    printf '  0) ← Back to main menu\n'
+
+    read -r -p "→ " choice || return 0
+    case "$choice" in
+      0|"") return 0 ;;
+      n|N) printf '\n'; ( core_dispatch "site:create" ) || log_warn "Finished with an error (see above)."; lapn_pause ;;
+      *)
+        if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= ${#domains[@]} )); then
+          site_actions_menu "${domains[$((choice - 1))]}"
+        else
+          log_warn "Invalid choice."; lapn_pause
+        fi ;;
+    esac
+  done
+}
+
+# Per-site action panel. Everything goes through core_dispatch so the CLI stays the
+# single implementation and the menu never grows its own copy of the logic.
+site_actions_menu() {
+  local domain="$1" choice st type name
+  while true; do
+    state_site_exists "$domain" || return 0   # deleted from inside this menu
+    type="$(state_site_get "$domain" type)"
+    name="$(state_site_get "$domain" name)"
+    st="$(_site_status "$domain")"
+    lapn_clear
+    printf '%s%sLapN%s › %s%s%s\n' "$C_BOLD" "$C_BLUE" "$C_RESET" "$C_BOLD" "$domain" "$C_RESET"
+    printf '  %s · Node v%s · 127.0.0.1:%s · SSL %s · %s\n' \
+      "$type" "$(state_site_get "$domain" node_version)" \
+      "$(state_site_get "$domain" port)" \
+      "$([[ "$(state_site_get "$domain" ssl)" == "true" ]] \
+          && echo "$(state_site_get "$domain" ssl_method)" || echo "off")" \
+      "$st"
+    printf '  %s%s%s\n\n' "$C_DIM" "$(state_site_get "$domain" root)" "$C_RESET"
+
+    printf '   1) Logs                      6) SSL\n'
+    printf '   2) Deploy (git pull + build) 7) Node version\n'
+    printf '   3) Rebuild                   8) Domain aliases\n'
+    printf '   4) Restart / Start / Stop    9) Info (raw state)\n'
+    printf '   5) Env vars                 10) Delete site\n'
+    printf '   0) ← Back\n'
+
+    read -r -p "→ " choice || return 0
+    printf '\n'
+    case "$choice" in
+      1)  site_logs_menu "$domain" ;;
+      2)  ( core_dispatch "deploy:git"     --domain "$domain" ) || log_warn "Finished with an error."; lapn_pause ;;
+      3)  ( core_dispatch "deploy:rebuild" --domain "$domain" ) || log_warn "Finished with an error."; lapn_pause ;;
+      4)  site_power_menu "$domain" ;;
+      5)  ( core_dispatch "site:env"       --domain "$domain" ) || log_warn "Finished with an error."; lapn_pause ;;
+      6)  ( core_dispatch "ssl:issue"      --domain "$domain" ) || log_warn "Finished with an error."; lapn_pause ;;
+      7)  ( core_dispatch "site:node"      --domain "$domain" ) || log_warn "Finished with an error."; lapn_pause ;;
+      8)  site_alias_menu "$domain" ;;
+      9)  ( core_dispatch "site:info"      --domain "$domain" ) || log_warn "Finished with an error."; lapn_pause ;;
+      10) ( core_dispatch "site:delete"    --domain "$domain" ) || log_warn "Finished with an error."
+          lapn_pause
+          state_site_exists "$domain" || return 0 ;;
+      0|"") return 0 ;;
+      *) log_warn "Invalid choice."; lapn_pause ;;
+    esac
+  done
+}
+
+site_logs_menu() {
+  local domain="$1" name choice logdir
+  name="$(state_site_get "$domain" name)"
+  logdir="${LAPN_SITES_HOME}/${name}/logs"
+  while true; do
+    lapn_clear
+    printf '%s%sLapN%s › %s › Logs\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET" "$domain"
+    printf '  1) App (journalctl -f)\n'
+    printf '  2) nginx access (tail -f)\n'
+    printf '  3) nginx errors (last 100)\n'
+    printf '  0) ← Back\n'
+    read -r -p "→ " choice || return 0
+    printf '\n'
+    case "$choice" in
+      1) ( core_dispatch "deploy:logs" --domain "$domain" ) || true; lapn_pause ;;
+      2) if [[ -f "$logdir/access.log" ]]; then tail -n 50 -f "$logdir/access.log" || true
+         else log_warn "No $logdir/access.log yet (site created before per-site logs — run a deploy to re-render)."; fi
+         lapn_pause ;;
+      3) if [[ -f "$logdir/error.log" ]]; then tail -n 100 "$logdir/error.log" || true
+         else log_warn "No $logdir/error.log yet."; fi
+         lapn_pause ;;
+      0|"") return 0 ;;
+      *) log_warn "Invalid choice."; lapn_pause ;;
+    esac
+  done
+}
+
+site_power_menu() {
+  local domain="$1" choice
+  lapn_clear
+  printf '%s%sLapN%s › %s › Process\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET" "$domain"
+  printf '  Current: %s\n\n' "$(_site_status "$domain")"
+  printf '  1) Restart\n'
+  printf '  2) Start\n'
+  printf '  3) Stop\n'
+  printf '  0) ← Back\n'
+  read -r -p "→ " choice || return 0
+  printf '\n'
+  case "$choice" in
+    1) ( core_dispatch "deploy:restart" --domain "$domain" ) || log_warn "Finished with an error."; lapn_pause ;;
+    2) ( core_dispatch "site:start"     --domain "$domain" ) || log_warn "Finished with an error."; lapn_pause ;;
+    3) ( core_dispatch "site:stop"      --domain "$domain" ) || log_warn "Finished with an error."; lapn_pause ;;
+    0|"") return 0 ;;
+    *) log_warn "Invalid choice."; lapn_pause ;;
+  esac
+}
+
+site_alias_menu() {
+  local domain="$1" choice a
+  while true; do
+    lapn_clear
+    printf '%s%sLapN%s › %s › Aliases\n\n' "$C_BOLD" "$C_BLUE" "$C_RESET" "$domain"
+    printf '  Primary : %s\n' "$domain"
+    printf '  Aliases :\n'
+    local found=""
+    while IFS= read -r a; do
+      [[ -n "$a" ]] && { printf '      %s\n' "$a"; found=1; }
+    done < <(state_jq -r --arg d "$domain" '(.sites[$d].aliases // [])[]' 2>/dev/null || true)
+    [[ -z "$found" ]] && printf '      %s(none)%s\n' "$C_DIM" "$C_RESET"
+    printf '  Canonical redirect to the primary: %s\n\n' \
+      "$([[ "$(state_site_get "$domain" canonical)" == "true" ]] && echo on || echo off)"
+    printf '  1) Add www.%s\n' "$domain"
+    printf '  2) Add another alias\n'
+    printf '  3) Remove an alias\n'
+    printf '  4) Toggle the canonical redirect\n'
+    printf '  0) ← Back\n'
+    read -r -p "→ " choice || return 0
+    printf '\n'
+    case "$choice" in
+      1) ( core_dispatch "site:alias" --domain "$domain" --add "www.$domain" ) \
+           || log_warn "Finished with an error."; lapn_pause ;;
+      2) local new; new="$(ui_ask "Alias to add (e.g. shop.$domain)")"
+         [[ -n "$new" ]] && { ( core_dispatch "site:alias" --domain "$domain" --add "$new" ) \
+           || log_warn "Finished with an error."; }
+         lapn_pause ;;
+      3) local gone; gone="$(ui_ask "Alias to remove")"
+         [[ -n "$gone" ]] && { ( core_dispatch "site:alias" --domain "$domain" --del "$gone" ) \
+           || log_warn "Finished with an error."; }
+         lapn_pause ;;
+      4) if [[ "$(state_site_get "$domain" canonical)" == "true" ]]; then
+           ( core_dispatch "site:alias" --domain "$domain" --no-canonical ) || log_warn "Error."
+         else
+           ( core_dispatch "site:alias" --domain "$domain" --canonical ) || log_warn "Error."
+         fi
+         lapn_pause ;;
+      0|"") return 0 ;;
+      *) log_warn "Invalid choice."; lapn_pause ;;
+    esac
+  done
 }
 
 # =====================================================================

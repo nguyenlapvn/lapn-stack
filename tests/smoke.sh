@@ -42,6 +42,9 @@ if LAPN_HOME="$LAPN_HOME" bash "$LAPN_HOME/bin/lapn" help >/tmp/lapn-help.txt 2>
   grep -q "db:create"   /tmp/lapn-help.txt && ok "db module discovered"   || bad "db:create not found"
   grep -q "stack:mariadb" /tmp/lapn-help.txt && ok "db-engine install under stack" || bad "stack:mariadb not found"
   grep -q "update"      /tmp/lapn-help.txt && ok "update command present" || bad "update command not found"
+  for c in site:env site:alias site:start site:stop; do
+    grep -q "$c" /tmp/lapn-help.txt && ok "$c present" || bad "$c not found"
+  done
 else
   bad "lapn help failed: $(cat /tmp/lapn-help.txt)"
 fi
@@ -87,6 +90,49 @@ got="$(adapter_node_bin fakeuser 18)"   # not installed -> fnm default alias
   && ok "falls back to the fnm default alias" || bad "fallback returned: $got"
 unset -f getent
 rm -rf "$fake_home"
+
+# --- 3a2) audit redaction + password allowlist ---
+# Regression: core_dispatch logs the whole command line, so --dbpass / --cf-token /
+# --key used to land in actions.log in plaintext (in a 0644 file).
+sect "secrets never reach the audit log"
+got="$(audit_redact db:create --site x.vn --dbpass 'S3cret' --dbuser app)"
+[[ "$got" != *S3cret* && "$got" == *"--dbpass ***"* ]] && ok "masks --dbpass" || bad "redact: $got"
+got="$(audit_redact ssl:issue --domain x.vn --cf-token 'tok123')"
+[[ "$got" != *tok123* ]] && ok "masks --cf-token" || bad "redact: $got"
+got="$(audit_redact db:remote --add --key 'ssh-ed25519 AAAA')"
+[[ "$got" != *AAAA* ]] && ok "masks --key" || bad "redact: $got"
+[[ "$(audit_redact site:create --domain x.vn)" == "site:create --domain x.vn" ]] \
+  && ok "leaves normal flags alone" || bad "redact mangled a normal command"
+
+sect "validate_db_password"
+validate_db_password "Abcd1234"        && ok "plain alnum ok"      || bad "alnum rejected"
+validate_db_password "short1"  2>/dev/null && bad "too short accepted" || ok "too short rejected"
+validate_db_password "a'b;DROP--x" 2>/dev/null && bad "quote accepted" || ok "quote rejected"
+validate_db_password 'p@ss:word/x'  2>/dev/null && bad "URL chars accepted" || ok "URL-breaking chars rejected"
+# The generated passwords must always satisfy the rule they are checked against.
+validate_db_password "$(openssl rand -base64 24 2>/dev/null | tr -d '/+=' | head -c 24)" \
+  && ok "generated password passes its own rule" || bad "generated password rejected"
+
+# --- 3b2) IP/CIDR helpers behind the DNS pre-flight ---
+# Regression: the check compared ONE resolved address (the AAAA, which getent returns
+# first) against the server's IPv4, so every Cloudflare-proxied domain was reported as
+# a DNS mistake instead of "use dns-cloudflare".
+sect "net.sh address helpers"
+# shellcheck source=/dev/null
+source "$LAPN_HOME/lib/net.sh"
+net_ip_in_cidr 173.245.48.10  173.245.48.0/20  && ok "in-range /20"      || bad "in-range /20 failed"
+net_ip_in_cidr 173.245.64.1   173.245.48.0/20  && bad "out-of-range /20 accepted" || ok "out-of-range /20"
+net_ip_in_cidr 104.16.0.0     104.16.0.0/13    && ok "network address"   || bad "network address failed"
+net_ip_in_cidr 104.23.255.255 104.16.0.0/13    && ok "broadcast edge"    || bad "broadcast edge failed"
+net_ip_in_cidr 104.24.0.0     104.16.0.0/13    && bad "off-by-one accepted" || ok "off-by-one rejected"
+net_ip_in_cidr 1.2.3.4        1.2.3.4          && ok "bare address = /32" || bad "bare address failed"
+net_ip_in_cidr "not-an-ip"    10.0.0.0/8       && bad "garbage accepted" || ok "garbage rejected"
+LAPN_HOME="$LAPN_HOME" net_is_cloudflare_ip 2606:4700:3032::6815:13c3 \
+  && ok "detects a Cloudflare IPv6" || bad "Cloudflare IPv6 not detected"
+LAPN_HOME="$LAPN_HOME" net_is_cloudflare_ip 139.180.128.212 \
+  && bad "plain VPS IP called Cloudflare" || ok "plain VPS IP not Cloudflare"
+LAPN_HOME="$LAPN_HOME" net_is_cloudflare_ip 104.16.1.1 \
+  && ok "detects a Cloudflare IPv4" || bad "Cloudflare IPv4 not detected"
 
 # --- 3c) core_config_set writes overrides into /etc/lapn/config ---
 sect "core_config_set"
@@ -142,6 +188,32 @@ JSON
       || bad "unit lapn-demo-local not active: $(systemctl show -p Result --value lapn-demo-local.service 2>/dev/null)"
     sleep 2
     curl -fsS "http://127.0.0.1:${port}/" >/dev/null && ok "curl 200 (port $port)" || bad "curl fail"
+
+    # Env vars: set, read back, and confirm the value is masked without --show.
+    lapn site:env --domain demo.local --set FOO=bar </dev/null >/dev/null \
+      && ok "site:env --set" || bad "site:env --set failed"
+    grep -q '^FOO=bar$' /etc/lapn/secrets/demo-local/.env \
+      && ok "site:env wrote the variable" || bad "FOO=bar not in .env"
+    lapn site:env --domain demo.local </dev/null | grep -q 'FOO' \
+      && ok "site:env lists the variable" || bad "site:env did not list FOO"
+    lapn site:env --domain demo.local </dev/null | grep -q 'bar' \
+      && bad "site:env leaked the value without --show" || ok "site:env masks values"
+
+    # Aliases: www. must end up in server_name of BOTH server blocks.
+    if lapn site:alias --domain demo.local --add www.demo.local </dev/null >/dev/null; then
+      ok "site:alias --add"
+      grep -q 'server_name demo.local www.demo.local;' \
+        /etc/nginx/sites-available/lapn-demo-local.conf \
+        && ok "alias lands in server_name" || bad "alias missing from server_name"
+      nginx -t 2>/dev/null && ok "nginx -t after alias" || bad "nginx -t failed after alias"
+    else
+      bad "site:alias --add failed"
+    fi
+
+    # Per-site nginx logs must actually exist (the logrotate rule depended on them).
+    curl -fsS -H 'Host: demo.local' "http://127.0.0.1/" >/dev/null 2>&1 || true
+    [[ -f /home/sites/demo-local/logs/access.log ]] \
+      && ok "per-site nginx access log" || bad "no /home/sites/demo-local/logs/access.log"
 
     # A site created with no repo must survive (no unit yet) and the first deploy
     # must be what creates and starts the unit.

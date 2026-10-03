@@ -77,6 +77,22 @@ validate_node_version() {
   return 1
 }
 
+# DB password. Allowlist, not blocklist: the value is interpolated into SQL
+# (IDENTIFIED BY '...'), into a mongosh JS literal, and into a DATABASE_URL. A quote or
+# backslash escapes the statement; ':' '@' '/' '?' '#' corrupt the URL. Everything here
+# is safe in all three, and the generated passwords already fit it.
+validate_db_password() {
+  local p="$1"
+  if (( ${#p} < 8 )); then
+    log_warn "Password must be at least 8 characters."
+    return 1
+  fi
+  if [[ "$p" =~ ^[A-Za-z0-9._~!*()-]{8,64}$ ]]; then return 0; fi
+  log_warn "Password may only use letters, digits and . _ ~ ! * ( ) - (max 64 chars)."
+  log_warn "Other characters break the SQL statement and the DATABASE_URL."
+  return 1
+}
+
 # Valid app type.
 validate_app_type() {
   local t="$1"

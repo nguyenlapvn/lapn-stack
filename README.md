@@ -30,10 +30,38 @@ Installer cài sẵn nginx + certbot deps, dựng `/etc/lapn`, viết rule UFW v
 
 ## Dùng nhanh
 
+Menu chính mở ra **danh sách site thật**, chọn số để vào bảng thao tác của site đó — không phải gõ lại domain cho từng lệnh:
+
+```
+LapN — Lightweight App Platform for Node.js
+  2 site(s), 1 down  ·  Disk 34%  ·  RAM 1.2G/2.0G  ·  UFW active
+
+LapN › Sites
+  #   DOMAIN                         TYPE     PORT   SSL  STATUS
+  1   havilandhouse.com              nextjs   3001   yes  running
+  2   shop.example.vn                static   -      no   static
+  n) + Create a new site
+
+--- chọn 1 ---
+LapN › havilandhouse.com
+  nextjs · Node v24 · 127.0.0.1:3001 · SSL certbot-nginx · running
+
+   1) Logs                      6) SSL
+   2) Deploy (git pull + build) 7) Node version
+   3) Rebuild                   8) Domain aliases
+   4) Restart / Start / Stop    9) Info (raw state)
+   5) Env vars                 10) Delete site
+```
+
+Mọi mục trong menu đều gọi đúng lệnh CLI bên dưới, không có bản sao logic riêng.
+
 ```bash
 lapn                       # mở menu tương tác (mặc định khi chạy trong terminal)
 lapn site:create           # wizard tạo site
 lapn site:list
+lapn site:env    --domain app.example.vn --set API_KEY=xxx   # sửa .env + tự restart
+lapn site:alias  --domain example.vn --add www.example.vn --canonical
+lapn site:start / site:stop
 lapn deploy:git  --domain app.example.vn            # pull + build + restart
 lapn ssl:issue   --domain app.example.vn --method dns-cloudflare --cf-token <API_TOKEN>
 lapn stack:mariadb                                   # cài engine DB
@@ -136,8 +164,26 @@ Cả block `:80` và block `:443` đều include cùng một file thân, nên c�
 - user hệ thống riêng `site_<name>`, home `/home/sites/<name>` mode 750
 - app bind `127.0.0.1:<port nội bộ 3001-3999>`, chỉ nginx proxy vào
 - systemd unit `lapn-<name>.service` có hardening (`ProtectSystem=strict`, `NoNewPrivileges`, `MemoryMax`, `CPUQuota`…)
-- `.env` nguồn ở `/etc/lapn/secrets/<name>/.env` (mode 600, owner root), systemd nạp qua `EnvironmentFile=`
+- `.env` nguồn ở `/etc/lapn/secrets/<name>/.env` (mode 600, owner root), systemd nạp qua `EnvironmentFile=`; sửa bằng `site:env` (tự restart), giá trị bị che khi liệt kê trừ khi thêm `--show`
+- log riêng từng site ở `/home/sites/<name>/logs/{access,error}.log`, logrotate xoay bằng `copytruncate`
 - state tập trung ở `/etc/lapn/sites.json`, chỉ đọc/ghi qua `lib/state.sh`
+
+### Alias tên miền
+
+```bash
+lapn site:alias --domain example.vn --add www.example.vn              # phục vụ cùng nội dung
+lapn site:alias --domain example.vn --add www.example.vn --canonical  # 301 về example.vn
+```
+
+Alias được thêm vào `server_name` của **cả** block `:80` và `:443`, và nếu site đã có SSL thì LapN tự cấp lại cert để phủ tên mới — thiếu bước đó là `https://www.` lỗi chứng chỉ. Canonical redirect nằm trong snippet dùng chung nên áp cho cả HTTP lẫn HTTPS bằng một dòng.
+
+## Ghi chú bảo mật
+
+- Audit log `/var/log/lapn/actions.log` ghi lại mọi lệnh, nhưng **che giá trị** của `--dbpass`, `--cf-token`, `--key`…; file tạo ở mode 0600 trong thư mục 0750.
+- Mật khẩu không bao giờ nằm trên command line (mọi local user đọc được qua `/proc/*/cmdline`): MySQL dùng defaults-file 0600, mongosh nhận script qua stdin, mongodump dùng `--config`.
+- Mật khẩu DB đi qua allowlist `[A-Za-z0-9._~!*()-]{8,64}` — ký tự khác sẽ thoát chuỗi SQL/JS mà nó bị nội suy vào, và làm hỏng `DATABASE_URL`.
+- `real_ip_header CF-Connecting-IP` chỉ bật cho site có `behind_cloudflare`, luôn kèm `set_real_ip_from` giới hạn dải Cloudflare — bật toàn cục sẽ cho phép giả mạo IP client.
+- Site sau Cloudflare vẫn vào được trực tiếp bằng IP (bypass WAF của CF). Nếu cần chặn, giới hạn UFW 80/443 chỉ cho dải Cloudflare.
 
 ## Phát triển
 

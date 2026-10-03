@@ -46,6 +46,51 @@ net_alloc_port() {
   return 1
 }
 
+# --- Address helpers (used by the DNS pre-flight check) ---
+
+# net_ip_to_int <a.b.c.d> -> the address as a 32-bit integer.
+net_ip_to_int() {
+  local o1 o2 o3 o4 IFS=.
+  read -r o1 o2 o3 o4 <<<"$1"
+  printf '%s' "$(( (o1 << 24) + (o2 << 16) + (o3 << 8) + o4 ))"
+}
+
+# net_ip_in_cidr <ipv4> <a.b.c.d/bits> -> 0 when the address falls inside the range.
+net_ip_in_cidr() {
+  local ip="$1" cidr="$2" base bits a b mask
+  base="${cidr%/*}"; bits="${cidr#*/}"
+  [[ "$bits" == "$cidr" ]] && bits=32
+  [[ "$ip"   =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  [[ "$base" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] || return 1
+  [[ "$bits" =~ ^[0-9]+$ ]] && (( bits <= 32 )) || return 1
+  (( bits == 0 )) && return 0
+  a="$(net_ip_to_int "$ip")"; b="$(net_ip_to_int "$base")"
+  mask=$(( (0xFFFFFFFF << (32 - bits)) & 0xFFFFFFFF ))
+  (( (a & mask) == (b & mask) ))
+}
+
+# net_is_cloudflare_ip <addr>... -> 0 when any address belongs to Cloudflare.
+# Ranges come from the realip snippet LapN already ships/refreshes, so this needs no
+# network of its own. IPv4 is an exact CIDR test; IPv6 compares the leading hextet,
+# which is only ever used to word a hint, never to block anything.
+net_is_cloudflare_ip() {
+  local snip="/etc/nginx/snippets/lapn-cloudflare-realip.conf"
+  [[ -f "$snip" ]] || snip="${LAPN_HOME:-}/templates/nginx/snippets/cloudflare-realip.conf"
+  [[ -f "$snip" ]] || return 1
+  local ip cidr
+  for ip in "$@"; do
+    while read -r cidr; do
+      [[ -z "$cidr" ]] && continue
+      if [[ "$ip" == *:* ]]; then
+        [[ "$cidr" == *:* && "${ip%%:*}" == "${cidr%%:*}" ]] && return 0
+      else
+        net_ip_in_cidr "$ip" "$cidr" && return 0
+      fi
+    done < <(awk '/^[[:space:]]*set_real_ip_from/{gsub(/;/,"",$2); print $2}' "$snip")
+  done
+  return 1
+}
+
 # net_check_user_port <port> -> validate a user-specified port (override --port).
 # Fail explicitly, do NOT automatically jump to another port.
 net_check_user_port() {

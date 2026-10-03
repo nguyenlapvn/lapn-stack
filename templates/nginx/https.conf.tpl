@@ -1,11 +1,11 @@
 
 # --- LapN :443 — appended by ssl:issue (dns-cloudflare / cf-origin). ---
 # certbot-nginx does not use this file: certbot writes its own 443 block.
-# Placeholders: DOMAIN NAME CERT KEY
+# Placeholders: DOMAIN SERVER_NAMES NAME CERT KEY
 server {
     listen 443 ssl http2;
     listen [::]:443 ssl http2;
-    server_name {{DOMAIN}};
+    server_name {{SERVER_NAMES}};
 
     ssl_certificate     {{CERT}};
     ssl_certificate_key {{KEY}};
