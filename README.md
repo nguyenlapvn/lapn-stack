@@ -86,13 +86,29 @@ lapn site:create --domain x.vn --node 24           # pin ngay lúc tạo
 
 ### SSL
 
-| `--method` | Khi nào dùng | Cần gì |
-|---|---|---|
-| `certbot-nginx` | DNS trỏ thẳng về VPS | port 80 mở |
-| `dns-cloudflare` | Site nằm sau proxy Cloudflare | `--cf-token` (quyền Zone.DNS:Edit), hoặc file `/etc/lapn/secrets/cloudflare.token` |
-| `cf-origin` | Dùng Cloudflare Origin CA | dán cert/key, cần chạy tương tác |
+| `--method` | Ai cấp cert | Khi nào dùng | Gia hạn |
+|---|---|---|---|
+| `certbot-nginx` | Let's Encrypt (HTTP-01) | DNS trỏ thẳng về VPS, **không** bật proxy Cloudflare (mây xám) | `certbot.timer`, tự động |
+| `dns-cloudflare` | Let's Encrypt (DNS-01) | Có bật proxy Cloudflare (mây cam), hoặc cần wildcard | `certbot.timer`, tự động |
+| `cf-origin` | Cloudflare Origin CA | Có bật proxy Cloudflare và muốn khỏi lo gia hạn | 15 năm, không cần |
+
+```bash
+lapn ssl:issue --domain app.example.vn --method certbot-nginx
+lapn ssl:issue --domain app.example.vn --method dns-cloudflare --cf-token <API_TOKEN>
+lapn ssl:issue --domain example.vn     --method dns-cloudflare --wildcard   # thêm *.example.vn
+```
+
+Vài điểm quyết định:
+
+- **Mây cam (proxy bật) thì đừng dùng `certbot-nginx`.** Cloudflare chặn giữa port 80, và nếu bật "Always Use HTTPS" thì challenge HTTP-01 bị redirect → fail. Lệnh có cảnh báo khi phát hiện trường hợp này. Dùng `dns-cloudflare` — nó xác thực qua bản ghi TXT nên không quan tâm port 80.
+- **Mây xám (Cloudflare chỉ làm DNS)** thì `certbot-nginx` chạy bình thường, đơn giản nhất, không cần API token.
+- **`cf-origin` chỉ hợp lệ giữa Cloudflare và origin.** Tắt mây cam là trình duyệt báo lỗi cert ngay. Bù lại không bao giờ phải gia hạn. Nhớ đặt SSL mode = **Full (strict)** trên Cloudflare.
+- Token cho `dns-cloudflare` cần quyền **Zone.DNS:Edit** trên zone đó. Truyền một lần bằng `--cf-token`, LapN lưu vào `/etc/lapn/secrets/cloudflare.token` (mode 600) để certbot dùng lại khi gia hạn.
+- `--wildcard` là **opt-in**. Không bật thì cert chỉ gồm đúng domain bạn đưa.
 
 Với `dns-cloudflare` / `cf-origin`, LapN tự bật snippet real-IP của Cloudflare — không có nó thì rate limit và fail2ban sẽ chặn theo IP edge của Cloudflare chứ không phải client thật.
+
+`certbot-nginx` tự thêm block `:443` và redirect HTTP→HTTPS. Hai method còn lại chỉ thêm `:443`, không redirect — khi đứng sau Cloudflare thì bật "Always Use HTTPS" ở phía Cloudflare là đủ.
 
 ## Kiến trúc
 

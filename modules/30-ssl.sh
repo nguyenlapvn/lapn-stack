@@ -7,12 +7,13 @@ MODULE_ORDER=30
 MODULE_COMMANDS=("ssl:issue" "ssl:renew" "ssl:status" "ssl:cf-ips-update")
 
 _ssl_parse() {
-  SSL_DOMAIN=""; SSL_METHOD=""; SSL_CF_TOKEN=""; SSL_DRYRUN=""
+  SSL_DOMAIN=""; SSL_METHOD=""; SSL_CF_TOKEN=""; SSL_DRYRUN=""; SSL_WILDCARD=""
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --domain)   SSL_DOMAIN="$2"; shift 2 ;;
       --method)   SSL_METHOD="$2"; shift 2 ;;
       --cf-token) SSL_CF_TOKEN="$2"; shift 2 ;;
+      --wildcard) SSL_WILDCARD=1; shift ;;
       --dry-run)  SSL_DRYRUN=1; shift ;;
       *) shift ;;
     esac
@@ -50,8 +51,13 @@ cmd_ssl_issue() {
     --prompt "SSL method" --select "certbot-nginx dns-cloudflare cf-origin" \
     --default "certbot-nginx" --validate validate_ssl_method)"
 
-  _ssl_ensure_certbot
-  local email; email="$(_ssl_account_email)"
+  # certbot and a Let's Encrypt account email only matter for the two LE methods.
+  # cf-origin is a Cloudflare-issued certificate: no ACME, no account, no renewals.
+  local email=""
+  if [[ "$method" != "cf-origin" ]]; then
+    _ssl_ensure_certbot
+    email="$(_ssl_account_email)"
+  fi
 
   case "$method" in
     certbot-nginx)   _ssl_issue_http01 "$domain" "$email" ;;
@@ -116,13 +122,14 @@ _ssl_issue_dns_cf() {
   fi
   [[ -f "$tokfile" ]] || die "Missing CF API token. Pass --cf-token or create $tokfile (Zone.DNS:Edit)."
   chmod 600 "$tokfile"
+  # Opt-in only. Asking for *.$domain unprompted puts names in the certificate that
+  # nobody requested, and on a token scoped to one record it fails the whole order.
+  local -a names=(-d "$domain")
+  [[ -n "$SSL_WILDCARD" ]] && { names+=(-d "*.$domain"); log_info "Also requesting the wildcard *.$domain"; }
   # shellcheck disable=SC2046
   certbot certonly --dns-cloudflare --dns-cloudflare-credentials "$tokfile" \
-    -d "$domain" -d "*.$domain" --agree-tos --non-interactive \
+    "${names[@]}" --agree-tos --non-interactive \
     $(_ssl_email_flag "$email") ${SSL_DRYRUN:+--dry-run} \
-    || certbot certonly --dns-cloudflare --dns-cloudflare-credentials "$tokfile" \
-        -d "$domain" --agree-tos --non-interactive \
-        $(_ssl_email_flag "$email") ${SSL_DRYRUN:+--dry-run} \
     || die "certbot DNS-01 failed."
   # Set behind_cloudflare BEFORE wiring: the re-render picks the real-IP snippet up.
   state_site_set_field "$domain" behind_cloudflare true

@@ -274,13 +274,13 @@ _site_allow_nginx_read() {
   return 0
 }
 
-# _site_write_nginx <domain> <name> <type> <port> <appdir> <user> <cf_on>
-# Writes the per-site body snippet (included by both the :80 and the :443 block) and the
-# sites-available conf, then enables it. The adapter for <type> must already be loaded.
-_site_write_nginx() {
+# _site_write_nginx_body <domain> <name> <type> <port> <appdir> <user> <cf_on>
+# Writes ONLY the per-site body snippet: headers, rate limits, locations and — for a
+# static site — the web root. Both the :80 block and whatever :443 block exists (ours
+# or certbot's) include this file, so rewriting it alone updates HTTP and HTTPS at once
+# and never disturbs the certificate wiring. The adapter for <type> must be loaded.
+_site_write_nginx_body() {
   local domain="$1" name="$2" type="$3" port="$4" appdir="$5" user="$6" cf_on="${7:-}"
-  local avail="/etc/nginx/sites-available/lapn-${name}.conf"
-  local enabled="/etc/nginx/sites-enabled/lapn-${name}.conf"
   local body="/etc/nginx/snippets/lapn-site-${name}.conf"
   local cf_include=""
   [[ "$cf_on" == "1" ]] && cf_include="include /etc/nginx/snippets/lapn-cloudflare-realip.conf;"
@@ -294,16 +294,32 @@ _site_write_nginx() {
         -e "s#{{CLIENT_MAX_BODY}}#${LAPN_CLIENT_MAX_BODY:-10m}#g" \
         -e "s#{{CF_REALIP_INCLUDE}}#${cf_include}#g" \
         "$LAPN_HOME/templates/nginx/body-static.conf.tpl" >"$body"
-    sed -e "s#{{DOMAIN}}#${domain}#g" \
-        -e "s#{{NAME}}#${name}#g" \
-        -e "s#{{ROOT}}#${root}#g" \
-        "$LAPN_HOME/templates/nginx/static.conf.tpl" >"$avail"
   else
     sed -e "s#{{DOMAIN}}#${domain}#g" \
         -e "s#{{PORT}}#${port}#g" \
         -e "s#{{CLIENT_MAX_BODY}}#${LAPN_CLIENT_MAX_BODY:-10m}#g" \
         -e "s#{{CF_REALIP_INCLUDE}}#${cf_include}#g" \
         "$LAPN_HOME/templates/nginx/body-proxy.conf.tpl" >"$body"
+  fi
+}
+
+# _site_write_nginx <domain> <name> <type> <port> <appdir> <user> <cf_on>
+# Body snippet PLUS the sites-available conf (the :80 server block), then enables it.
+# This REPLACES the conf, so any :443 block in it is dropped — only call it when the
+# caller is going to re-add the certificate wiring.
+_site_write_nginx() {
+  local domain="$1" name="$2" type="$3" port="$4" appdir="$5" user="$6" cf_on="${7:-}"
+  local avail="/etc/nginx/sites-available/lapn-${name}.conf"
+  local enabled="/etc/nginx/sites-enabled/lapn-${name}.conf"
+  _site_write_nginx_body "$@"
+
+  if [[ "$type" == "static" ]]; then
+    local root; root="$(adapter_static_root)"
+    sed -e "s#{{DOMAIN}}#${domain}#g" \
+        -e "s#{{NAME}}#${name}#g" \
+        -e "s#{{ROOT}}#${root}#g" \
+        "$LAPN_HOME/templates/nginx/static.conf.tpl" >"$avail"
+  else
     sed -e "s#{{DOMAIN}}#${domain}#g" \
         -e "s#{{NAME}}#${name}#g" \
         -e "s#{{PORT}}#${port}#g" \
@@ -312,12 +328,15 @@ _site_write_nginx() {
   ln -sf "$avail" "$enabled"
 }
 
-# site_render_nginx <domain> — (re)render a site's nginx config from the templates,
-# reading everything from state. Used by ssl:issue (so the :80 and :443 blocks always
-# come from one source) and after a static rebuild (the web root may have just appeared).
-# Drops any :443 block, which the caller re-appends.
+# site_render_nginx <domain> [--body-only]
+# (Re)render a site's nginx config from the templates, reading everything from state.
+#   --body-only : rewrite just the shared snippet. SSL wiring is untouched, so this is
+#                 what a rebuild uses (a static site's web root can change when dist/
+#                 first appears, and that must not cost the site its :443 block).
+#   default     : also rewrite the :80 server block, DROPPING any :443 block. Only
+#                 ssl:issue uses this, because it re-adds the block right after.
 site_render_nginx() {
-  local domain="$1"
+  local domain="$1" mode="${2:-}"
   state_site_exists "$domain" || { log_error "No site '$domain'."; return 1; }
   local name type port root user cf
   name="$(state_site_get "$domain" name)"
@@ -330,7 +349,11 @@ site_render_nginx() {
   SITE_DOMAIN="$domain" SITE_NAME="$name" SITE_USER="$user" SITE_ROOT="$root" SITE_PORT="$port"
   export SITE_DOMAIN SITE_NAME SITE_USER SITE_ROOT SITE_PORT
   load_adapter "$type"
-  _site_write_nginx "$domain" "$name" "$type" "$port" "$root" "$user" "$cf"
+  if [[ "$mode" == "--body-only" ]]; then
+    _site_write_nginx_body "$domain" "$name" "$type" "$port" "$root" "$user" "$cf"
+  else
+    _site_write_nginx "$domain" "$name" "$type" "$port" "$root" "$user" "$cf"
+  fi
 }
 
 # Attach a database to an existing site. Returns non-zero (without killing the caller)
@@ -645,8 +668,9 @@ cmd_deploy_rebuild() {
       _site_first_unit "$domain"
     fi
   else
-    # The web root may only exist now (dist/ appears with the first build).
-    site_render_nginx "$domain" || die "Rendering the nginx config failed."
+    # The web root may only exist now (dist/ appears with the first build). Body only:
+    # rewriting the server block here would silently delete the site's :443 block.
+    site_render_nginx "$domain" --body-only || die "Rendering the nginx config failed."
     nginx -t || die "nginx -t error after the rebuild."
     systemctl reload nginx
     log_ok "Static build updated."
