@@ -169,6 +169,23 @@ printf '1,1,1,1,1,1,0,0\n' >"$m_dir/system.csv"
 _metrics_series 20 10 >/dev/null 2>&1 && bad "single sample produced a series" \
   || ok "single sample reports no series"
 
+# Regression: `read` returns 1 at EOF without a trailing newline, and under `set -e`
+# that killed the whole process — the dashboard exited at the first site row and the
+# sampler died before writing a single row. Every producer feeding a `read` must end
+# its output with a newline.
+systemctl() { printf 'MemoryCurrent=193142784\nCPUUsageNSec=41000000000\n'; }
+[[ "$(_metrics_unit_usage demo | od -c | tail -2 | head -1)" == *'\n'* ]] \
+  && ok "_metrics_unit_usage ends with a newline" || bad "_metrics_unit_usage has no trailing newline"
+( set -euo pipefail
+  read -r _m _c < <(_metrics_unit_usage demo)
+  exit 0 ) && ok "read of it survives set -e" || bad "read under set -e still aborts"
+unset -f systemctl
+# No awk format string may contain a raw newline (awk rejects it at parse time).
+awk 'BEGIN{exit}' 2>/dev/null && \
+  { grep -qE 'printf "[^"]*$' "$LAPN_HOME/modules/05-dashboard.sh" \
+      && bad "an awk printf string is broken across lines" \
+      || ok "no awk format string split across lines"; }
+
 _dash_init_blocks
 # One glyph per value, no trailing newline — wc -m counts characters, not bytes.
 [[ "$(_dash_spark 0 50 100 | wc -m)" -eq 3 ]] && ok "sparkline: one glyph per value" \

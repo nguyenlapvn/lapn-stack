@@ -46,12 +46,14 @@ cmd_metrics_sample() {
   cpu_total=$(( u + n + s + i + w + irq + sirq + steal ))
   cpu_idle=$(( i + w ))
 
+  # `print`, not `printf`: it appends the newline that `read` needs to return 0.
+  # Without it `read` hits EOF, returns 1, and `set -e` kills the whole sampler.
   read -r mem_total mem_avail < <(
-    awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%d %d", t, a}' /proc/meminfo)
+    awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t, a}' /proc/meminfo) || true
   disk_pct="$(df -P / 2>/dev/null | awk 'NR==2{gsub("%","",$5); print $5+0}')"
   read -r net_rx net_tx < <(
-    awk 'NR>2 {gsub(":","",$1); if ($1!="lo") {rx+=$2; tx+=$10}} END{printf "%d %d", rx+0, tx+0}' \
-      /proc/net/dev)
+    awk 'NR>2 {gsub(":","",$1); if ($1!="lo") {rx+=$2; tx+=$10}} END{print rx+0, tx+0}' \
+      /proc/net/dev) || true
 
   _metrics_append "$(_metrics_sys)" \
     "${ts},${cpu_total},${cpu_idle},${mem_total},${mem_avail},${disk_pct:-0},${net_rx},${net_tx}"
@@ -62,7 +64,7 @@ cmd_metrics_sample() {
     [[ -z "$domain" ]] && continue
     name="$(state_site_get "$domain" name)"
     [[ -z "$name" ]] && continue
-    read -r mem cpu < <(_metrics_unit_usage "$name")
+    read -r mem cpu < <(_metrics_unit_usage "$name") || true
     _metrics_append "$(_metrics_site "$name")" "${ts},${mem},${cpu}"
   done < <(state_sites_list 2>/dev/null)
 }
@@ -76,7 +78,9 @@ _metrics_unit_usage() {
   cpu="$(printf '%s\n' "$out" | sed -n 's/^CPUUsageNSec=//p')"
   [[ "$mem" =~ ^[0-9]+$ ]] || mem=0
   [[ "$cpu" =~ ^[0-9]+$ ]] || cpu=0
-  printf '%s %s' "$mem" "$cpu"
+  # Trailing newline is required: the callers use `read`, which returns 1 on EOF
+  # without a delimiter — fatal under `set -e`.
+  printf '%s %s\n' "$mem" "$cpu"
 }
 
 # Install (and start) the sampling timer. Safe to call repeatedly.
@@ -221,7 +225,8 @@ _dash_render() {
     local cnow="${c[-1]}" mnow="${m[-1]}" dnow="${d[-1]}"
     local load; load="$(awk '{print $1" "$2" "$3}' /proc/loadavg 2>/dev/null)"
     local memt mema
-    read -r memt mema < <(awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{printf "%d %d", t, a}' /proc/meminfo)
+    read -r memt mema < <(
+      awk '/^MemTotal:/{t=$2} /^MemAvailable:/{a=$2} END{print t, a}' /proc/meminfo) || true
     local dfline; dfline="$(df -Ph / 2>/dev/null | awk 'NR==2{print $3" / "$2}')"
 
     printf ' CPU   %s%s%s  %s%3s%%%s   load %s\n' \
@@ -245,7 +250,7 @@ _dash_render() {
     name="$(state_site_get "$domain" name)"
     type="$(state_site_get "$domain" type)"
     st="$(_site_status "$domain")"
-    read -r mem cpu < <(_metrics_unit_usage "$name")
+    read -r mem cpu < <(_metrics_unit_usage "$name") || true
     memh="$(_dash_human_bytes "$mem")"
     cpup="$(_dash_site_cpu "$name" "$cpu" "$now")"
     case "$st" in
