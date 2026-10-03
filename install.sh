@@ -127,6 +127,15 @@ if ! grep -qE '^\s*SystemMaxUse=' /etc/systemd/journald.conf; then
 fi
 ok "journald cap ${jmax}."
 
+# metrics sampler for `lapn dashboard`
+cp -f "$LAPN_HOME/templates/systemd/lapn-metrics.service" /etc/systemd/system/lapn-metrics.service
+cp -f "$LAPN_HOME/templates/systemd/lapn-metrics.timer"   /etc/systemd/system/lapn-metrics.timer
+mkdir -p -m 750 "${LAPN_METRICS_DIR:-/var/lib/lapn/metrics}"
+systemctl daemon-reload 2>/dev/null || true
+systemctl enable --now lapn-metrics.timer 2>/dev/null \
+  && ok "metrics sampler every 1 min (lapn dashboard)." \
+  || warn "Could not enable lapn-metrics.timer — the dashboard will show live values only."
+
 # --- 7) Ask to change the SSH port (anti-lockout) ---
 if [[ -z "$UPDATE_MODE" && -t 0 ]]; then
   read -r -p "Change SSH port (currently $cur_ssh)? Enter a new port or press Enter to keep: " newp || true

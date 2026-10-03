@@ -30,6 +30,39 @@ Installer cài sẵn nginx + certbot deps, dựng `/etc/lapn`, viết rule UFW v
 
 ## Dùng nhanh
 
+### Dashboard
+
+`lapn dashboard` (hoặc mục 1 ở menu chính) — một màn hình tự refresh, có biểu đồ 24h:
+
+```
+LapN · dashboard   2026-10-04 11:42:05   up 12d 4h
+
+ CPU   ▂▂▃▄▄▄▄▄▃▂▂▁▁▁▁▁▁▁▁▁▁▁▂▂▃▄▄▄▄▃▃▂▁▁▁▁▁▁▁▁▁▁▁▁▂▃▃▄▄▄▄▃   40%   load 0.31 0.22 0.19
+ RAM   ▃▃▃▃▃▃▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▅▅▅▅▅▅   60%   1.2G / 2.0G
+ DISK  ▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃▃   32%   17G / 50G
+       └─ last 24h ─┘
+
+ #   DOMAIN                       STATUS    MEM     CPU    SSL     TYPE
+ 1   havilandhouse.com            running   184M    0.8%   45d     nextjs
+ 2   shop.example.vn              static    -       -      9d      static
+ 3   api.example.vn               failed    -       -      no      express
+
+ SERVICES  nginx · fail2ban · mariadb · redis · UFW
+ ALERTS    cert shop.example.vn 9d · api.example.vn down
+
+ q quit   r refresh   c create site   1-9 open site   w window: └─ last 24h ─┘
+```
+
+Phím `1`–`9` mở thẳng bảng thao tác của site đó, `w` đổi khung thời gian 1h/6h/24h.
+
+RAM và CPU theo site lấy từ **cgroup của chính systemd unit** (`MemoryCurrent`, `CPUUsageNSec`) — số liệu của kernel, không phải parse `ps`.
+
+Lịch sử do `lapn-metrics.timer` lấy mẫu mỗi phút vào `/var/lib/lapn/metrics/*.csv`, giữ 1440 dòng (24h, ~70KB/file). File chỉ lưu **counter thô** của kernel chứ không lưu phần trăm, nên mất mẫu hay chỉnh giờ hệ thống cũng không làm hỏng chuỗi — tỉ lệ được tính lúc vẽ, và khoảng nào counter bị reset (reboot) thì bị bỏ qua.
+
+Terminal không phải UTF-8 thì biểu đồ tự chuyển sang ký tự ASCII.
+
+### Menu
+
 Menu chính mở ra **danh sách site thật**, chọn số để vào bảng thao tác của site đó — không phải gõ lại domain cho từng lệnh:
 
 ```

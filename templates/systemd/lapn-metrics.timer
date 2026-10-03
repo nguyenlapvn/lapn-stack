@@ -1,0 +1,12 @@
+# LapN — sample resources once a minute. 1440 samples = the 24h the dashboard draws.
+[Unit]
+Description=Sample LapN metrics every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=lapn-metrics.service
+
+[Install]
+WantedBy=timers.target

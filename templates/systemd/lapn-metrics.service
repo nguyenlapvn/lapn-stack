@@ -1,0 +1,12 @@
+# LapN — one metrics sample. Driven by lapn-metrics.timer, not enabled on its own.
+[Unit]
+Description=LapN metrics sample
+After=network.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/lapn metrics:sample
+# Writes only its own ring buffer under /var/lib/lapn.
+NoNewPrivileges=true
+ProtectHome=true
+PrivateTmp=true

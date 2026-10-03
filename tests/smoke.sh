@@ -134,6 +134,51 @@ LAPN_HOME="$LAPN_HOME" net_is_cloudflare_ip 139.180.128.212 \
 LAPN_HOME="$LAPN_HOME" net_is_cloudflare_ip 104.16.1.1 \
   && ok "detects a Cloudflare IPv4" || bad "Cloudflare IPv4 not detected"
 
+# --- 3b3) dashboard metrics: raw counters in, percentages out ---
+sect "metrics series + sparkline"
+# shellcheck source=/dev/null
+source "$LAPN_HOME/modules/05-dashboard.sh"
+m_dir="$(mktemp -d)"; export LAPN_METRICS_DIR="$m_dir"
+# 20 samples at a steady 25% CPU, RAM 40%, disk 31%.
+: >"$m_dir/system.csv"
+ct=0; ci=0; ts=1759500000
+for k in $(seq 1 20); do
+  ct=$((ct + 1000)); ci=$((ci + 750))          # 25% busy
+  printf '%s,%s,%s,2000000,1200000,31,0,0\n' "$((ts + k * 60))" "$ct" "$ci" >>"$m_dir/system.csv"
+done
+mapfile -t SER < <(_metrics_series 20 10)
+[[ "${#SER[@]}" == 3 ]] && ok "series returns cpu/mem/disk" || bad "series returned ${#SER[@]} lines"
+read -r _ first _ <<<"${SER[0]}"
+[[ "$first" == 25 ]] && ok "cpu derived from counters (25%)" || bad "cpu was '$first', expected 25"
+read -r _ mfirst _ <<<"${SER[1]}"
+[[ "$mfirst" == 40 ]] && ok "mem derived (40%)" || bad "mem was '$mfirst', expected 40"
+read -r _ dfirst _ <<<"${SER[2]}"
+[[ "$dfirst" == 31 ]] && ok "disk passed through (31%)" || bad "disk was '$dfirst', expected 31"
+# shellcheck disable=SC2086
+[[ "$(set -- ${SER[0]#cpu }; echo $#)" == 10 ]] && ok "bucketed into the requested columns" \
+  || bad "wrong bucket count"
+
+# A reboot resets the kernel counters; that interval must be dropped, not turned into
+# a bogus spike or a division by zero.
+printf '%s,10,5,2000000,1200000,31,0,0\n' "$((ts + 21 * 60))" >>"$m_dir/system.csv"
+mapfile -t SER2 < <(_metrics_series 20 10)
+[[ "${#SER2[@]}" == 3 ]] && ok "survives a counter reset" || bad "counter reset broke the series"
+
+# Too little data must fail cleanly so the dashboard can say "collecting".
+printf '1,1,1,1,1,1,0,0\n' >"$m_dir/system.csv"
+_metrics_series 20 10 >/dev/null 2>&1 && bad "single sample produced a series" \
+  || ok "single sample reports no series"
+
+_dash_init_blocks
+# One glyph per value, no trailing newline — wc -m counts characters, not bytes.
+[[ "$(_dash_spark 0 50 100 | wc -m)" -eq 3 ]] && ok "sparkline: one glyph per value" \
+  || bad "sparkline length $(_dash_spark 0 50 100 | wc -m), expected 3"
+[[ "$(_dash_spark 0 50 100)" != "$(_dash_spark 100 50 0)" ]] && ok "sparkline tracks the values" \
+  || bad "sparkline ignores its input"
+[[ "$(LC_ALL=C; _dash_init_blocks; _dash_spark 0 50 100)" =~ ^[_.~=+*#-]+$ ]] \
+  && ok "ASCII fallback on a non-UTF-8 terminal" || bad "ASCII fallback wrong"
+rm -rf "$m_dir"; unset LAPN_METRICS_DIR
+
 # --- 3c) core_config_set writes overrides into /etc/lapn/config ---
 sect "core_config_set"
 cfg_dir="$(mktemp -d)"

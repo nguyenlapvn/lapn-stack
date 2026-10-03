@@ -52,6 +52,16 @@ cmd_update() {
 # Re-copy only assets that are NOT mutated at runtime, so template fixes propagate
 # without clobbering runtime state (HSTS toggle in security-headers, generated CF IPs).
 _self_sync_assets() {
+  # Metrics sampler first: it has nothing to do with nginx, so it must not sit behind
+  # the nginx guard below.
+  if command -v systemctl >/dev/null 2>&1; then
+    cp -f "$LAPN_HOME/templates/systemd/lapn-metrics.service" /etc/systemd/system/lapn-metrics.service
+    cp -f "$LAPN_HOME/templates/systemd/lapn-metrics.timer"   /etc/systemd/system/lapn-metrics.timer
+    mkdir -p -m 750 "${LAPN_METRICS_DIR:-/var/lib/lapn/metrics}"
+    systemctl daemon-reload 2>/dev/null || true
+    systemctl enable --now lapn-metrics.timer 2>/dev/null || true
+  fi
+
   command -v nginx >/dev/null 2>&1 || return 0
   mkdir -p /etc/nginx/snippets
 

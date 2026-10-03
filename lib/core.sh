@@ -85,9 +85,14 @@ core_dispatch() {
   if ! declare -F "$fn" >/dev/null; then
     die "Command does not exist: '$cmd'. Type 'lapn help' to see the list."
   fi
-  # Separate args, not one joined string: audit_cmd has to see flag/value pairs to be
-  # able to mask the values of --dbpass, --cf-token and friends.
-  audit_cmd "$cmd" "$@"
+  # Read-only and timer-driven commands are not audited: metrics:sample alone would add
+  # 1440 lines a day and bury the entries that matter.
+  case "$cmd" in
+    metrics:sample|dashboard|doctor|version|site:list|site:info|db:status|db:list|stack:status|ssl:status) : ;;
+    # Separate args, not one joined string: audit_cmd has to see flag/value pairs to be
+    # able to mask the values of --dbpass, --cf-token and friends.
+    *) audit_cmd "$cmd" "$@" ;;
+  esac
   "$fn" "$@"
 }
 
