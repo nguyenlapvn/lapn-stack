@@ -50,9 +50,11 @@ cmd_stack_node() {
   local ver="${1:-${LAPN_NODE_DEFAULT:-20}}"
   log_step "Installing Node v$ver (via fnm)"
   command -v fnm >/dev/null 2>&1 || _stack_install_fnm
-  # fnm needs env; call within a subshell that evals env.
-  bash -lc "eval \"\$(fnm env --shell bash)\"; fnm install $ver && fnm default $ver"
-  log_ok "Node v$ver installed."
+  # fnm needs env; call within a subshell that evals env. Checked explicitly rather
+  # than relying on set -e, which is suppressed when a caller uses `cmd_stack_node ||`.
+  bash -lc "eval \"\$(fnm env --shell bash)\"; fnm install $ver && fnm default $ver" \
+    || { log_error "Installing Node v$ver failed."; return 1; }
+  log_ok "Node v$ver installed and set as default."
 }
 
 # stack:nginx — install Nginx (idempotent).
@@ -71,10 +73,23 @@ cmd_stack_nginx() {
 cmd_stack_pm2() {
   core_require_root
   command -v fnm >/dev/null 2>&1 || _stack_install_fnm
+  # fnm on its own ships no npm: a Node version has to be installed AND set as the
+  # default before `fnm env` puts node/npm on PATH. Install it instead of failing with
+  # a bare "npm: command not found".
+  if ! _stack_node_ready; then
+    log_info "No Node version is active for this user — installing the default first."
+    cmd_stack_node || die "Installing PM2 failed: could not install Node."
+  fi
   log_step "Installing PM2 (npm -g)"
   bash -lc "eval \"\$(fnm env --shell bash 2>/dev/null)\"; npm install -g pm2" \
     || die "Installing PM2 failed."
   log_ok "PM2 installed: $(bash -lc 'eval "$(fnm env --shell bash 2>/dev/null)"; pm2 --version' 2>/dev/null || echo '?')"
+}
+
+# True when a Node version is installed AND selected as the fnm default, i.e. a fresh
+# login shell really gets node/npm. `command -v fnm` alone proves none of that.
+_stack_node_ready() {
+  bash -lc 'eval "$(fnm env --shell bash 2>/dev/null)"; command -v node >/dev/null 2>&1' 2>/dev/null
 }
 
 # DB engine installers — delegate to the Database module's installer (cmd_db_install),
@@ -130,9 +145,9 @@ stack_install_node_for_user() {
 # Installable components: keys + human labels (same index).
 _STACK_KEYS=(base nginx node pm2 mariadb postgres mongo redis)
 _STACK_LABELS=(
-  "Base packages (curl, git, jq, ufw, fail2ban, openssl, logrotate)"
+  "Base packages (curl, git, jq, ufw, fail2ban, openssl, logrotate, fnm)"
   "Nginx"
-  "Node (fnm)"
+  "Node (fnm) — installs + defaults Node v${LAPN_NODE_DEFAULT:-20}"
   "PM2 (process manager)"
   "MariaDB"
   "PostgreSQL"
@@ -145,7 +160,9 @@ stack_is_installed() {
   case "$1" in
     base) return 1 ;;  # no single marker; always allow running the base install
     nginx) command -v nginx >/dev/null 2>&1 ;;
-    node)  command -v fnm >/dev/null 2>&1 ;;
+    # NOT `command -v fnm`: the base install ships fnm, which would mark Node as done
+    # while no Node version exists — and then PM2 dies on "npm: command not found".
+    node)  _stack_node_ready ;;
     pm2)   bash -lc 'eval "$(fnm env --shell bash 2>/dev/null)"; command -v pm2 >/dev/null 2>&1' ;;
     mariadb|postgres|mongo|redis) state_service_installed "$1" ;;
     *) return 1 ;;
