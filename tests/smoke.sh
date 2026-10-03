@@ -104,6 +104,14 @@ got="$(audit_redact db:remote --add --key 'ssh-ed25519 AAAA')"
 [[ "$(audit_redact site:create --domain x.vn)" == "site:create --domain x.vn" ]] \
   && ok "leaves normal flags alone" || bad "redact mangled a normal command"
 
+# Regression: a Match block left open at the end of a drop-in keeps applying to the
+# rest of sshd_config, which puts UsePAM/Subsystem inside a Match context and makes
+# `sshd -t` reject the whole configuration.
+sect "db:remote sshd drop-in"
+grep -A30 'Match User \${user}' "$LAPN_HOME/modules/20-db.sh" | grep -q '^Match all$' \
+  && ok "tunnel Match block is closed with 'Match all'" \
+  || bad "the sshd drop-in leaves its Match block open"
+
 sect "validate_db_password"
 validate_db_password "Abcd1234"        && ok "plain alnum ok"      || bad "alnum rejected"
 validate_db_password "short1"  2>/dev/null && bad "too short accepted" || ok "too short rejected"

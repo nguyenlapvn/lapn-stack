@@ -494,6 +494,13 @@ cmd_db_remote() {
   chmod 600 "$home/.ssh/authorized_keys"; chown -R "$user:$user" "$home/.ssh"
 
   # Match block: only port-forward to localhost DB ports, no shell.
+  #
+  # The closing `Match all` is NOT optional. Ubuntu's sshd_config starts with
+  # `Include /etc/ssh/sshd_config.d/*.conf`, and a Match block that is still open at
+  # the end of an included file keeps applying to the rest of the configuration. The
+  # main file's `UsePAM` and `Subsystem sftp` would then sit inside a Match context —
+  # neither keyword is allowed there, so `sshd -t` fails and this command dies with a
+  # confusing error. `Match all` closes the block and restores the global context.
   local conf="/etc/ssh/sshd_config.d/lapn-tunnel-${user}.conf"
   cat >"$conf" <<EOF
 Match User ${user}
@@ -506,6 +513,8 @@ Match User ${user}
     AllowTcpForwarding local
     PermitOpen 127.0.0.1:3306 127.0.0.1:5432 127.0.0.1:27017 127.0.0.1:6379
     ForceCommand /usr/sbin/nologin
+
+Match all
 EOF
   sshd -t || { rm -f "$conf"; die "sshd_config error — cancelled."; }
   systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null
@@ -530,9 +539,13 @@ ${C_BOLD}Navicat configuration (SSH tunnel)${C_RESET}
   General tab (connect to DB over the tunnel — localhost IS the server):
     Host        : 127.0.0.1
     Port        : 3306 (MariaDB) | 5432 (Postgres) | 27017 (Mongo) | 6379 (Redis)
-    User / Pass : per-site DB user (see the site's .env)
+    User / Pass : the per-site DB user
 
-Note: the DB port is NOT exposed to the Internet; it only travels inside the SSH tunnel.
+Credentials for a site:   lapn site:env --domain <domain> --show
+Databases LapN manages:   lapn db:list
+
+Note: the DB port is NOT exposed to the Internet; it only travels inside the SSH
+tunnel, and this user can forward to nothing else (PermitOpen) and gets no shell.
 EOF
 }
 
